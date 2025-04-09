@@ -1,0 +1,38 @@
+# Dependencies
+/code/node_modules
+/code/.pnp
+/code/.pnp.js
+
+# Testing
+/code/coverage
+
+# Next.js
+/code/.next/
+/code/out/
+
+# Production
+/code/build
+
+# Misc
+/code/.DS_Store
+/code/*.pem
+/code/.env*.local
+/code/npm-debug.log*
+/code/yarn-debug.log*
+/code/yarn-error.log*
+
+# IDE
+/code/.idea
+/code/.vscode
+/code/*.swp
+/code/*.swo
+
+# TypeScript
+/code/*.tsbuildinfo
+/code/next-env.d.ts
+
+# Keep these directories
+!/Design
+!/Images
+!/memory-bank
+!/Process 
