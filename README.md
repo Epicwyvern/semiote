@@ -1,6 +1,6 @@
-# Semiote - Let the Symbols Speak
+![Wordmark Slogan borders](https://github.com/user-attachments/assets/a140a852-26eb-4d0d-81ba-bb0ce9146a88)
 
-![Semiote Logo](/public/Semiote%20Name%20Logo%20Transparent.png)
+
 
 ## Overview
 Semiote is a symbol analysis, interpretation, and creation platform designed to help users immerse themselves in the world of symbols.
