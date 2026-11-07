@@ -30,11 +30,11 @@ export default function RootLayout({
         <link rel="manifest" href="/site.webmanifest" />
       </head>
       <body className="bg-bone-white text-obsidian-black font-lato">
-        <div className="flex min-h-screen bg-bone-white overflow-hidden">
+        <div className="flex h-[100dvh] overflow-hidden bg-bone-white">
           <Sidebar />
-          <div className="flex-1 flex flex-col bg-bone-white ml-[80px]">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-bone-white ml-[80px]">
             <Header />
-            <main className="flex-1 relative bg-bone-white overflow-hidden">{children}</main>
+            <main className="relative min-h-0 flex-1 overflow-hidden bg-bone-white">{children}</main>
           </div>
         </div>
       </body>

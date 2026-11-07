@@ -1,729 +1,676 @@
 "use client"
 
 import type React from "react"
-
-import { useState, useEffect, useRef, useCallback } from "react"
-import { Button } from "@/components/ui/button"
-import { Upload, X, FileSymlink, ArrowUpFromLine, ExternalLink, Info, ChevronLeft, ChevronRight } from "lucide-react"
+import { useEffect, useRef, useState } from "react"
+import { ArrowUpFromLine, ChevronLeft, ChevronRight, ExternalLink, FileSymlink, Info, LoaderCircle, Scan, X } from "lucide-react"
 import Link from "next/link"
+import { Button } from "@/components/ui/button"
 
-// Simulated symbol detection results
-const sampleDetectionResults = [
-  {
-    name: "Mandala",
-    category: "Spiritual",
-    confidence: 9.4,
-    prominence: 8.7,
-    authenticity: 9.2,
-    description: "A geometric configuration of symbols with spiritual significance in various traditions. This circular design represents the universe and cosmic harmony.",
-    overallScoreRationale: "This Mandala symbol scores highly (9.1/10) due to its distinctive concentric patterns and clear spiritual significance. The authenticity score (9.2) is particularly strong as it displays classic mandala elements with high precision.",
-    contextDescription: "The Mandala is a sacred geometric symbol that appears in spiritual traditions across Asia, particularly in Hinduism and Buddhism. It represents the cosmos and serves as an aid to meditation practices, drawing the eye toward its center to symbolize unity and harmony.",
-    origin: "India/Tibet",
-    timePeriod: "500 BCE - Present",
-    primaryUse: "Meditation",
-    culturalPrevalence: "Widespread",
-    visualComplexity: "High",
-    keyElements: "Concentric circles, Symmetry, Geometric patterns, Central point",
-    boundingBox: { x: 50, y: 50, width: 500, height: 500 }
-  },
-  {
-    name: "Lotus Flower",
-    category: "Eastern",
-    confidence: 8.7,
-    prominence: 8.3,
-    authenticity: 8.9,
-    description: "A sacred symbol in many Eastern traditions, representing purity, enlightenment, and rebirth. Often depicted with symmetrical petals emerging from muddy waters.",
-    overallScoreRationale: "The Lotus Flower scores 8.6/10 due to its clear symbolic outline and cultural significance. Its authenticity (8.9) stands out as this representation closely matches traditional Eastern iconography.",
-    contextDescription: "The Lotus Flower holds profound meaning in Eastern religious traditions, particularly in Buddhism and Hinduism. It represents spiritual awakening and transcendence, emerging clean from muddy waters as a metaphor for spiritual growth.",
-    origin: "Egypt/India",
-    timePeriod: "1500 BCE - Present",
-    primaryUse: "Religious",
-    culturalPrevalence: "Regional",
-    visualComplexity: "Medium",
-    keyElements: "Symmetrical petals, Center, Stem",
-    boundingBox: { x: 250, y: 300, width: 100, height: 80 }
-  },
-  {
-    name: "Sun Motif",
-    category: "Universal",
-    confidence: 7.6,
-    prominence: 7.9,
-    authenticity: 7.3,
-    description: "A representation of the sun, universally recognized as a symbol of life, energy, and divine power across many cultures throughout human history.",
-    overallScoreRationale: "The Sun Motif scores 7.6/10, with its prominence (7.9) being the strongest aspect due to its central position in the image. Its authenticity (7.3) is lower as this design lacks some traditional detailing.",
-    contextDescription: "The Sun as a symbol appears in virtually every human culture throughout history. As the source of light and life-sustaining energy, it naturally became associated with divinity, power, and life cycles across civilizations.",
-    origin: "Universal",
-    timePeriod: "Prehistoric - Present",
-    primaryUse: "Religious",
-    culturalPrevalence: "Universal",
-    visualComplexity: "Low",
-    keyElements: "Disc, Rays, Circular form",
-    boundingBox: { x: 275, y: 275, width: 50, height: 50 }
+type SymbolRegion = {
+  id: string
+  name: string
+  category: string
+  confidence: number
+  boundingBox: { x: number; y: number; width: number; height: number }
+  maskWidth: number
+  maskHeight: number
+  maskSpans: [number, number, number][]
+}
+type RegionBox = { x: number; y: number; width: number; height: number }
+
+type SymbolAnalysis = {
+  name: string
+  category: string
+  confidence: number
+  prominence: number
+  authenticity: number
+  description: string
+  overallScoreRationale: string
+  contextDescription: string
+  origin: string
+  timePeriod: string
+  primaryUse: string
+  culturalPrevalence: string
+  visualComplexity: string
+  keyElements: string
+  thinkingProcess: string[]
+  imageType: string
+  dominantSubject: string
+  embeddedSymbols: string[]
+  classificationReasoning: string
+}
+
+const emptyAnalysis: SymbolAnalysis = {
+  name: "",
+  category: "Symbol",
+  confidence: 0,
+  prominence: 0,
+  authenticity: 0,
+  description: "",
+  overallScoreRationale: "",
+  contextDescription: "",
+  origin: "Unknown",
+  timePeriod: "Unknown",
+  primaryUse: "Unknown",
+  culturalPrevalence: "Unknown",
+  visualComplexity: "Unknown",
+  keyElements: "Unknown",
+  thinkingProcess: [],
+  imageType: "ambiguous",
+  dominantSubject: "Unknown subject",
+  embeddedSymbols: [],
+  classificationReasoning: ""
+}
+
+const asText = (value: unknown, fallback = "Unknown") => typeof value === "string" && value.trim() ? value : fallback
+const asScore = (value: unknown) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0
+  const score = value > 0 && value <= 1 ? value * 10 : value
+  return Math.max(0, Math.min(10, score))
+}
+
+function normalizeAnalysis(data: Record<string, unknown>): SymbolAnalysis {
+  const embeddedSymbols = Array.isArray(data.embeddedSymbols)
+    ? data.embeddedSymbols.filter((item): item is string => typeof item === "string")
+    : []
+  const thinkingProcess = Array.isArray(data.thinkingProcess)
+    ? data.thinkingProcess.filter((item): item is string => typeof item === "string")
+    : []
+
+  return {
+    ...emptyAnalysis,
+    name: asText(data.name, "Symbol"),
+    category: asText(data.category, "Symbol"),
+    confidence: asScore(data.confidence),
+    prominence: asScore(data.prominence),
+    authenticity: asScore(data.authenticity),
+    description: asText(data.description, "No visual description returned."),
+    overallScoreRationale: asText(data.overallScoreRationale, ""),
+    contextDescription: asText(data.contextDescription, ""),
+    origin: asText(data.origin),
+    timePeriod: asText(data.timePeriod),
+    primaryUse: asText(data.primaryUse),
+    culturalPrevalence: asText(data.culturalPrevalence),
+    visualComplexity: asText(data.visualComplexity),
+    keyElements: asText(data.keyElements),
+    thinkingProcess,
+    imageType: asText(data.imageType, "ambiguous"),
+    dominantSubject: asText(data.dominantSubject),
+    embeddedSymbols,
+    classificationReasoning: asText(data.classificationReasoning, "")
   }
-];
+}
 
 export default function DiscernPage() {
-  const [isDragging, setIsDragging] = useState(false)
-  const [uploadedImages, setUploadedImages] = useState<string[]>([]) // Store multiple images
-  const [currentImageIndex, setCurrentImageIndex] = useState(0) // Track current image
-  const [isAnalyzing, setIsAnalyzing] = useState(false)
-  const [detectionResults, setDetectionResults] = useState<any[] | null>(null)
-  const [selectedSymbol, setSelectedSymbol] = useState<number | null>(null)
+  const [images, setImages] = useState<string[]>([])
+  const [imageIndex, setImageIndex] = useState(0)
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 })
-  const [activeSymbol, setActiveSymbol] = useState(0)
-  
-  // Track image container height for matching
-  const [imageContainerHeight, setImageContainerHeight] = useState(0)
-  const imageRef = useRef<HTMLDivElement>(null)
-  const [thinkingProcessData, setThinkingProcessData] = useState<Array<{symbolName: string, thinking: string[]}>>([])
+  const [imageViewport, setImageViewport] = useState({ width: 0, height: 0 })
+  const [regions, setRegions] = useState<SymbolRegion[]>([])
+  const [imageClassification, setImageClassification] = useState<{ kind: string; summary: string; source: 'openai' | 'generic' } | null>(null)
+  const [isDrawingRegion, setIsDrawingRegion] = useState(false)
+  const [manualRegion, setManualRegion] = useState<RegionBox | null>(null)
+  const [draftRegion, setDraftRegion] = useState<RegionBox | null>(null)
+  const [drawStart, setDrawStart] = useState<{ x: number; y: number } | null>(null)
+  const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null)
+  const [analyses, setAnalyses] = useState<Record<string, SymbolAnalysis>>({})
+  const [isDragging, setIsDragging] = useState(false)
+  const [isSegmenting, setIsSegmenting] = useState(false)
+  const [busyRegionId, setBusyRegionId] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const imageStageRef = useRef<HTMLDivElement>(null)
+  const maskCanvasRef = useRef<HTMLCanvasElement>(null)
 
-  // Add error state
-  const [error, setError] = useState<string | null>(null);
+  const selectedRegion = regions.find((region) => region.id === selectedRegionId) || null
+  const selectedAnalysis = selectedRegionId ? analyses[selectedRegionId] : null
+  const imageScale = imageSize.width && imageSize.height && imageViewport.width && imageViewport.height
+    ? Math.min(imageViewport.width / imageSize.width, imageViewport.height / imageSize.height)
+    : 0
+  const renderedImageWidth = imageSize.width * imageScale
+  const renderedImageHeight = imageSize.height * imageScale
+  const imageOffsetX = (imageViewport.width - renderedImageWidth) / 2
+  const imageOffsetY = (imageViewport.height - renderedImageHeight) / 2
 
-  // Effect to update image container height
+  const getImagePoint = (event: React.PointerEvent<HTMLDivElement>) => {
+    const stage = imageStageRef.current
+    if (!stage || imageScale <= 0) return null
+    const bounds = stage.getBoundingClientRect()
+    const x = ((event.clientX - bounds.left - imageOffsetX) / renderedImageWidth) * 1000
+    const y = ((event.clientY - bounds.top - imageOffsetY) / renderedImageHeight) * 1000
+    if (x < 0 || x > 1000 || y < 0 || y > 1000) return null
+    return { x, y }
+  }
+
+  const boxFromPoints = (start: { x: number; y: number }, end: { x: number; y: number }): RegionBox => ({
+    x: Math.min(start.x, end.x),
+    y: Math.min(start.y, end.y),
+    width: Math.abs(end.x - start.x),
+    height: Math.abs(end.y - start.y),
+  })
+
+  const getRegionLabel = (region: SymbolRegion) => analyses[region.id]?.name || region.name
+
   useEffect(() => {
-    if (imageRef.current) {
-      const updateHeight = () => {
-        if (imageRef.current) {
-          setImageContainerHeight(imageRef.current.clientHeight)
+    const stage = imageStageRef.current
+    if (!stage) return
+
+    const observer = new ResizeObserver(([entry]) => {
+      setImageViewport({ width: entry.contentRect.width, height: entry.contentRect.height })
+    })
+    observer.observe(stage)
+    return () => observer.disconnect()
+  }, [images.length, imageIndex])
+
+  useEffect(() => {
+    const canvas = maskCanvasRef.current
+    const firstRegion = regions[0]
+    if (!canvas || !firstRegion) return
+
+    canvas.width = firstRegion.maskWidth
+    canvas.height = firstRegion.maskHeight
+    const context = canvas.getContext('2d')
+    if (!context) return
+
+    const imageData = context.createImageData(canvas.width, canvas.height)
+    const palette = ['#087e8b', '#a53f58', '#276749', '#6b4c9a', '#c17b2a', '#2773a5']
+    const paintRegion = (region: SymbolRegion, regionIndex: number, selected: boolean) => {
+      const color = selected ? '#e2a817' : palette[regionIndex % palette.length]
+      const red = Number.parseInt(color.slice(1, 3), 16)
+      const green = Number.parseInt(color.slice(3, 5), 16)
+      const blue = Number.parseInt(color.slice(5, 7), 16)
+      const alpha = selected ? 115 : 65
+
+      for (const [y, start, end] of region.maskSpans) {
+        for (let x = start; x < end; x++) {
+          const offset = (y * canvas.width + x) * 4
+          imageData.data[offset] = red
+          imageData.data[offset + 1] = green
+          imageData.data[offset + 2] = blue
+          imageData.data[offset + 3] = alpha
         }
-      }
-      
-      // Reset height when changing images to ensure proper resizing
-      setImageContainerHeight(0)
-      
-      // Use a small delay to ensure the image has rendered
-      const timer = setTimeout(() => {
-        updateHeight()
-      }, 100)
-      
-      window.addEventListener('resize', updateHeight)
-      
-      return () => {
-        window.removeEventListener('resize', updateHeight)
-        clearTimeout(timer)
       }
     }
-  }, [uploadedImages, currentImageIndex])
 
-  // Add clipboard paste event listener
-  useEffect(() => {
-    const handlePaste = (e: ClipboardEvent) => {
-      if (e.clipboardData) {
-        // Check if clipboard contains images
-        const items = e.clipboardData.items;
-        let imageFound = false;
-        
-        for (let i = 0; i < items.length; i++) {
-          if (items[i].type.indexOf('image') !== -1) {
-            imageFound = true;
-            const blob = items[i].getAsFile();
-            if (blob) {
-              const reader = new FileReader();
-              reader.onload = (e) => {
-                if (e.target && typeof e.target.result === "string") {
-                  // Reset any existing analysis
-                  setUploadedImages([e.target.result]);
-                  setCurrentImageIndex(0);
-                  setIsAnalyzing(true);
-                  setDetectionResults(null);
-                  setSelectedSymbol(null);
-                  
-                  // Process the pasted image
-                  processImageWithAI(e.target.result);
-                }
-              };
-              reader.readAsDataURL(blob);
-            }
-            break;
-          }
-        }
-        
-        if (imageFound) {
-          e.preventDefault();
-        }
-      }
-    };
-    
-    document.addEventListener('paste', handlePaste);
-    
-    return () => {
-      document.removeEventListener('paste', handlePaste);
-    };
-  }, []);
+    regions.forEach((region, index) => {
+      if (region.id !== selectedRegionId) paintRegion(region, index, false)
+    })
+    const selectedIndex = regions.findIndex((region) => region.id === selectedRegionId)
+    if (selectedIndex >= 0) paintRegion(regions[selectedIndex], selectedIndex, true)
+    context.putImageData(imageData, 0, 0)
+  }, [regions, selectedRegionId])
 
-  // Update the processImageWithAI function to capture all the returned fields
-  const processImageWithAI = async (imageBase64: string) => {
-    setIsAnalyzing(true);
-    setError(null); // Clear any previous errors
-    
+  const analyzeRegion = async (imageDataUrl: string, region: SymbolRegion) => {
+    setBusyRegionId(region.id)
+    setError(null)
+
     try {
-      // Step 1: Segment the image to find symbols using SAM
-      const segmentResponse = await fetch('/api/segment', {
+      const response = await fetch('/api/enhancedAnalysis', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: imageBase64.split(',')[1] })
-      });
-      
-      if (!segmentResponse.ok) {
-        const errorData = await segmentResponse.json();
-        throw new Error(`Segmentation failed: ${errorData.error || segmentResponse.statusText}`);
-      }
-      
-      const segmentData = await segmentResponse.json();
-      
-      // Check if any symbols were detected
-      if (!segmentData.symbols || segmentData.symbols.length === 0) {
-        throw new Error('No symbols detected in the image');
-      }
-      
-      // For simplicity in the demo, use the first symbol if multiple were detected
-      const boundingBox = segmentData.symbols[0]?.boundingBox;
-      
-      // Step 2: Analyze the symbol with enhanced analysis that includes books and wiki data
-      const analysisResponse = await fetch('/api/enhancedAnalysis', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          imageBase64: imageBase64.split(',')[1],
-          boundingBox
+        body: JSON.stringify({
+          imageDataUrl,
+          boundingBox: { ...region.boundingBox, coordinateScale: 1000 },
+          symbolName: region.name
         })
-      });
-      
-      if (!analysisResponse.ok) {
-        const errorData = await analysisResponse.json();
-        throw new Error(`Analysis failed: ${errorData.error || analysisResponse.statusText}`);
-      }
-      
-      const analysisData = await analysisResponse.json();
-      
-      // Format the results for display in the existing UI
-      const formattedResults = [
-        {
-          name: analysisData.analysis.name,
-          category: analysisData.analysis.category,
-          confidence: analysisData.analysis.confidence,
-          prominence: analysisData.analysis.prominence,
-          authenticity: analysisData.analysis.authenticity,
-          description: analysisData.analysis.description,
-          overallScoreRationale: analysisData.analysis.overallScoreRationale || "Score based on confidence, prominence, and authenticity metrics.",
-          contextDescription: analysisData.analysis.contextDescription || analysisData.analysis.description,
-          origin: analysisData.analysis.origin || "Unknown",
-          timePeriod: analysisData.analysis.timePeriod || "Unknown",
-          primaryUse: analysisData.analysis.primaryUse || "Unknown",
-          culturalPrevalence: analysisData.analysis.culturalPrevalence || "Unknown",
-          visualComplexity: analysisData.analysis.visualComplexity || "Medium",
-          keyElements: analysisData.analysis.keyElements || "Various geometric elements",
-          boundingBox: boundingBox || null
-        }
-      ];
-      
-      // Format thinking process data
-      const formattedThinkingProcess = [
-        {
-          symbolName: analysisData.analysis.name,
-          thinking: analysisData.analysis.thinkingProcess || []
-        }
-      ];
-      
-      // Update state with the analysis results
-      setDetectionResults(formattedResults);
-      setThinkingProcessData(formattedThinkingProcess);
-      setSelectedSymbol(0);
-      setActiveSymbol(0);
-    } catch (error) {
-      console.error('Error analyzing image:', error);
-      setError((error as Error).message || 'Failed to analyze image');
-      // Set fallback data for demo purposes
-      setDetectionResults(sampleDetectionResults);
-      setSelectedSymbol(0);
-      setActiveSymbol(0);
+      })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.details || result.error || 'Symbol analysis failed')
+      if (!result.analysis || typeof result.analysis !== 'object') throw new Error('The analysis response was incomplete')
+      setAnalyses((previous) => ({ ...previous, [region.id]: normalizeAnalysis(result.analysis) }))
+    } catch (analysisError) {
+      setError((analysisError as Error).message || 'Symbol analysis failed')
     } finally {
-      setIsAnalyzing(false);
-    }
-  };
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragging(true)
-  }
-
-  const handleDragLeave = () => {
-    setIsDragging(false)
-  }
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragging(false)
-
-    const files = e.dataTransfer.files
-    if (files.length > 0) {
-      handleFiles(Array.from(files))
+      setBusyRegionId((current) => current === region.id ? null : current)
     }
   }
 
-  const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      handleFiles(Array.from(e.target.files))
-    }
-  }
+  const runSegmentation = async (imageDataUrl: string, focusedRegion?: RegionBox) => {
+    setIsSegmenting(true)
+    setIsDrawingRegion(false)
+    setDraftRegion(null)
+    setDrawStart(null)
+    if (!focusedRegion) setManualRegion(null)
+    setRegions([])
+    setImageClassification(null)
+    setSelectedRegionId(null)
+    setAnalyses({})
+    setError(null)
 
-  // New function to handle multiple files
-  const handleFiles = (files: File[]) => {
-    const imageFiles = files.filter(file => file.type.startsWith("image/"))
-    
-    if (imageFiles.length === 0) {
-      alert("Please upload image files (SVG, PNG, JPG, or WEBP).")
-      return
-    }
-    
-    // Check size limits
-    const oversizedFiles = imageFiles.filter(file => file.size > 10 * 1024 * 1024)
-    if (oversizedFiles.length > 0) {
-      alert("Some files exceed the 10MB limit and will be skipped.")
-    }
-    
-    const validFiles = imageFiles.filter(file => file.size <= 10 * 1024 * 1024)
-    
-    if (validFiles.length === 0) {
-      return
-    }
-    
-    // Process first image immediately, queue the rest
-    processImage(validFiles[0], 0, validFiles)
-  }
-  
-  // Process a single image from the queue
-  const processImage = (file: File, index: number, allFiles: File[]) => {
-    const reader = new FileReader()
-    
-    reader.onload = (e) => {
-      if (e.target && typeof e.target.result === "string") {
-        // Add this image to our collection
-        if (index === 0) {
-          // First image, start fresh
-          setUploadedImages([e.target.result])
-          setCurrentImageIndex(0)
-          setIsAnalyzing(true)
-          setDetectionResults(null)
-          setSelectedSymbol(null)
-        } else {
-          // Additional image - ensure we only add strings to the array
-          setUploadedImages(prev => [...prev, e.target?.result as string])
-        }
-        
-        // If it's the first image, process with AI
-        if (index === 0) {
-          processImageWithAI(e.target.result);
-        }
-        
-        // Process next image if available
-        if (index < allFiles.length - 1) {
-          processImage(allFiles[index + 1], index + 1, allFiles)
-        }
+    try {
+      const response = await fetch('/api/segment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageDataUrl, manualRegion: focusedRegion })
+      })
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.details || result.error || 'Image segmentation failed')
+      if (result.imageClassification && typeof result.imageClassification === 'object') {
+        setImageClassification(result.imageClassification)
       }
+      const found = Array.isArray(result.symbols) ? result.symbols as SymbolRegion[] : []
+      setRegions(found)
+      if (found.length === 0) {
+        setError(focusedRegion
+          ? 'No distinct motif could be segmented inside that selection. Try including a little background around the motif.'
+          : 'No named symbols were detected. You can select an area to inspect it manually.')
+        return
+      }
+      // The dashed box is input guidance; only SAM masks remain after detection.
+      if (focusedRegion) setManualRegion(null)
+      setSelectedRegionId(found[0].id)
+      setIsSegmenting(false)
+      await analyzeRegion(imageDataUrl, found[0])
+    } catch (segmentationError) {
+      setError((segmentationError as Error).message || 'Image segmentation failed')
+    } finally {
+      setIsSegmenting(false)
     }
-    
-    reader.readAsDataURL(file)
+  }
+
+  useEffect(() => {
+    const handlePaste = (event: ClipboardEvent) => {
+      const imageItem = Array.from(event.clipboardData?.items || []).find((item) => item.type.startsWith('image/'))
+      const file = imageItem?.getAsFile()
+      if (!file) return
+      event.preventDefault()
+      void readFiles([file])
+    }
+    document.addEventListener('paste', handlePaste)
+    return () => document.removeEventListener('paste', handlePaste)
+  }, [])
+
+  const readFiles = async (files: File[]) => {
+    const accepted = files.filter((file) => file.type.startsWith('image/') && file.size <= 10 * 1024 * 1024)
+    if (accepted.length === 0) {
+      setError('Choose an image under 10 MB in PNG, JPG, WEBP, or SVG format.')
+      return
+    }
+    if (accepted.length < files.length) setError('Some files were skipped because they are not supported images or exceed 10 MB.')
+
+    const dataUrls = await Promise.all(accepted.map((file) => new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('Could not read image'))
+      reader.onerror = () => reject(new Error(`Could not read ${file.name}`))
+      reader.readAsDataURL(file)
+    })))
+    setImages(dataUrls)
+    setImageIndex(0)
+    setImageSize({ width: 0, height: 0 })
+    setManualRegion(null)
+    setDraftRegion(null)
+    void runSegmentation(dataUrls[0])
+  }
+
+  const handleFileInput = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || [])
+    if (files.length) void readFiles(files)
+    event.target.value = ''
+  }
+
+  const selectRegion = (region: SymbolRegion) => {
+    setSelectedRegionId(region.id)
+    const imageDataUrl = images[imageIndex]
+    if (imageDataUrl && !analyses[region.id]) void analyzeRegion(imageDataUrl, region)
   }
 
   const removeImage = () => {
-    if (uploadedImages.length <= 1) {
-      // Last image, reset everything
-      setUploadedImages([])
-      setDetectionResults(null)
-      setSelectedSymbol(null)
-    } else {
-      // Remove current image
-      setUploadedImages(prev => prev.filter((_, idx) => idx !== currentImageIndex))
-      
-      // Adjust current index if needed
-      if (currentImageIndex >= uploadedImages.length - 1) {
-        setCurrentImageIndex(uploadedImages.length - 2)
-      }
-    }
-  }
-  
-  // Navigation functions with AI processing
-  const goToNextImage = () => {
-    if (currentImageIndex < uploadedImages.length - 1) {
-      setCurrentImageIndex(prev => prev + 1)
-      
-      // Process the next image with AI
-      processImageWithAI(uploadedImages[currentImageIndex + 1]);
-    }
-  }
-  
-  const goToPrevImage = () => {
-    if (currentImageIndex > 0) {
-      setCurrentImageIndex(prev => prev - 1)
-      
-      // Process the previous image with AI
-      processImageWithAI(uploadedImages[currentImageIndex - 1]);
-    }
+    setImages([])
+    setImageIndex(0)
+    setRegions([])
+    setImageClassification(null)
+    setSelectedRegionId(null)
+    setAnalyses({})
+    setError(null)
+    setManualRegion(null)
+    setDraftRegion(null)
+    setIsDrawingRegion(false)
   }
 
-  // Replace the getScoreGradient function with a proper gradient based on score
-  const getScoreGradient = (score: number) => {
-    // Create a gradient from dark brown (#726025) to Gold Leaf
-    return `bg-gradient-to-r from-[#726025] to-gold-leaf`;
-  };
-
-  // Add function to calculate overall score
-  const calculateOverallScore = (symbol: any) => {
-    if (!symbol) return 0;
-    // Weight the different metrics to create an overall score
-    const weightedSum = 
-      (symbol.confidence * 0.4) + 
-      (symbol.prominence * 0.3) + 
-      (symbol.authenticity * 0.3);
-    
-    // Return score on a scale of 10 (already in 0-10 range)
-    return weightedSum.toFixed(1);
-  };
+  const score = selectedAnalysis
+    ? ((selectedAnalysis.confidence * 0.4) + (selectedAnalysis.prominence * 0.3) + (selectedAnalysis.authenticity * 0.3)).toFixed(1)
+    : '0.0'
 
   return (
-    <div className="relative min-h-screen bg-bone-white ml-[80px]">
-      <div className="px-8 py-12">
-        <div className="text-left max-w-full">
-          <div className="flex items-center mb-4 text-gold-leaf">
-            <FileSymlink size={24} className="mr-3" />
-            <h1 className="text-3xl font-garamond">Discern</h1>
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[#FDFBF6] px-4 py-4 font-lato text-base leading-relaxed text-[#0B0B0B] sm:px-6 sm:py-6">
+      <header className="mb-5 flex shrink-0 items-center justify-between gap-3 border-b border-[#3A3A3A]/20 pb-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-[#816719]">
+            <FileSymlink size={19} />
+            <h1 className="font-garamond text-4xl font-bold uppercase tracking-wide">Discern</h1>
           </div>
-          
-          <p className="text-lg mb-8 max-w-3xl text-ash-grey">
-            Upload an image to identify and analyze symbols within it. Our advanced algorithms will detect 
-            and highlight symbolic elements, providing context and interpretation.
+          <p className="mt-2 max-w-4xl text-base text-[#3A3A3A]">
+            {imageClassification
+              ? `${imageClassification.kind}: ${imageClassification.summary}${imageClassification.source === 'generic' ? ' Â· broad detection used' : ''}`
+              : 'Classify the image, then inspect each detected symbol region.'}
           </p>
+        </div>
+        {images.length > 1 && (
+          <div className="flex shrink-0 items-center gap-1 text-base">
+            <button aria-label="Previous image" disabled={imageIndex === 0 || isSegmenting} onClick={() => { const next = imageIndex - 1; setImageIndex(next); void runSegmentation(images[next]) }} className="border border-[#3A3A3A]/20 p-3 disabled:opacity-40"><ChevronLeft size={16} /></button>
+            <span className="px-2 tabular-nums">{imageIndex + 1} / {images.length}</span>
+            <button aria-label="Next image" disabled={imageIndex >= images.length - 1 || isSegmenting} onClick={() => { const next = imageIndex + 1; setImageIndex(next); void runSegmentation(images[next]) }} className="border border-[#3A3A3A]/20 p-3 disabled:opacity-40"><ChevronRight size={16} /></button>
+          </div>
+        )}
+      </header>
 
-          {uploadedImages.length === 0 ? (
-            <div
-              className={`border-2 border-dashed rounded-lg p-12 flex flex-col items-center justify-center transition-colors ${
-                isDragging ? "border-gold-leaf bg-gold-leaf/5" : "border-ash-grey/30 bg-parchment/10"
-              }`}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onDrop={handleDrop}
-            >
-              <div className="w-16 h-16 mb-4 flex items-center justify-center">
-                <ArrowUpFromLine className="h-10 w-10 text-ash-grey/50" />
+      {images.length === 0 ? (
+        <div
+          className={`flex min-h-0 flex-1 flex-col items-center justify-center border border-dashed p-6 text-center transition-colors ${isDragging ? 'border-[#816719] bg-[#eee4d1]' : 'border-[#cfc4af] bg-[#FDFBF6]'}`}
+          onDragOver={(event) => { event.preventDefault(); setIsDragging(true) }}
+          onDragLeave={() => setIsDragging(false)}
+          onDrop={(event) => { event.preventDefault(); setIsDragging(false); void readFiles(Array.from(event.dataTransfer.files)) }}
+        >
+          <ArrowUpFromLine className="mb-4 h-8 w-8 text-[#816719]" />
+          <p className="text-base text-[#2d2a27]">Drop images here, paste from clipboard, or choose files</p>
+          <p className="mt-2 text-base text-[#6a645d]">PNG, JPG, WEBP, or SVG Â· 10 MB maximum per image</p>
+          <input type="file" accept="image/*" multiple className="hidden" id="image-upload" onChange={handleFileInput} />
+          <Button asChild className="mt-5 h-12 rounded-none border border-[#816719] bg-[#D4AF37] px-5 text-base text-[#0B0B0B] hover:bg-[#c29d2e]">
+            <label htmlFor="image-upload" className="cursor-pointer">Choose images</label>
+          </Button>
+          {error && <p role="alert" className="mt-4 text-base text-[#8b342c]">{error}</p>}
+        </div>
+      ) : (
+        <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(240px,42%)_minmax(0,1fr)] gap-5 overflow-hidden lg:grid-cols-[minmax(340px,1fr)_minmax(0,1.35fr)] lg:grid-rows-1">
+          <section className="flex min-h-0 flex-col border border-[#3A3A3A]/20 bg-[#FDFBF6] p-3 sm:p-4">
+            <div className="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#3A3A3A]/15 pb-2">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="text-sm font-bold uppercase tracking-widest text-[#595959]">Image</span>
+                <span className="truncate text-base text-[#3A3A3A]">{regions.length ? `${regions.length} ${regions.length === 1 ? 'region' : 'regions'}` : isSegmenting ? 'Finding regions…' : 'No regions found'}</span>
               </div>
-              <p className="text-center text-ash-grey mb-2">Click to upload, drag and drop, or paste (Ctrl+V) one or more images</p>
-              <p className="text-center text-moonlit-silver text-sm mb-6">
-                SVG, PNG, JPG or WEBP (MAX. 10 MB per image)
-              </p>
-              <input type="file" accept="image/*" multiple className="hidden" id="image-upload" onChange={handleFileInput} />
-              <Button asChild className="bg-gold-leaf hover:bg-gold-leaf/80 text-obsidian-black border-none">
-                <label htmlFor="image-upload" className="cursor-pointer px-4 py-2">
-                  Select Files
-                </label>
-              </Button>
+              <div className="flex shrink-0 items-center gap-1">
+                {manualRegion && !isDrawingRegion && (
+                  <button
+                    onClick={() => void runSegmentation(images[imageIndex], manualRegion)}
+                    disabled={isSegmenting}
+                    className="border border-[#816719] bg-[#D4AF37] min-h-11 px-3 py-2 text-sm font-medium text-[#0B0B0B] disabled:opacity-50"
+                  >
+                    Analyze selection
+                  </button>
+                )}
+                {(manualRegion || isDrawingRegion) && (
+                  <button
+                    onClick={() => { setManualRegion(null); setDraftRegion(null); setDrawStart(null); setIsDrawingRegion(false) }}
+                    className="border border-[#d0c5b1] min-h-11 px-3 py-2 text-sm text-[#3A3A3A] hover:bg-[#F7ECC8]"
+                  >
+                    Cancel
+                  </button>
+                )}
+                {!isDrawingRegion && !manualRegion && (
+                  <button
+                    onClick={() => { setError(null); setIsDrawingRegion(true) }}
+                    className="flex items-center gap-1 border border-[#d0c5b1] min-h-11 px-3 py-2 text-sm text-[#3A3A3A] hover:bg-[#F7ECC8]"
+                  >
+                    <Scan size={18} /> Select area
+                  </button>
+                )}
+                <button onClick={removeImage} aria-label="Remove image" title="Remove image" className="border border-[#d0c5b1] flex min-h-11 min-w-11 items-center justify-center p-2 text-[#3A3A3A] hover:bg-[#F7ECC8]"><X size={18} /></button>
+              </div>
             </div>
-          ) : (
-            <div>
-              <div className="flex flex-col lg:flex-row gap-8">
-                {/* Left side: Image Container */}
-                <div className="lg:w-[35%]" ref={imageRef}>
-                  <div className="relative rounded-lg overflow-hidden border border-ash-grey/20 bg-parchment/5">
-                    <img
-                      src={uploadedImages[currentImageIndex]}
-                      alt={`Uploaded image ${currentImageIndex + 1}`}
-                      className="w-full h-auto"
-                    />
-                    
-                    {/* Overlay detection boxes */}
-                    {detectionResults && !isAnalyzing && (
-                      <div className="absolute top-0 left-0 w-full h-full">
-                        {detectionResults.map((result, index) => (
-                          <div 
-                            key={index}
-                            className={`absolute border-2 ${selectedSymbol === index ? 'border-gold-leaf' : 'border-obsidian-black'} 
-                              cursor-pointer transition-colors hover:border-gold-leaf`}
-                            style={{
-                              top: `${(result.boundingBox.y / imageSize.height) * 100}%`,
-                              left: `${(result.boundingBox.x / imageSize.width) * 100}%`,
-                              width: `${(result.boundingBox.width / imageSize.width) * 100}%`,
-                              height: `${(result.boundingBox.height / imageSize.height) * 100}%`
-                            }}
-                            onClick={() => {
-                              setSelectedSymbol(index)
-                              setActiveSymbol(index)
-                            }}
-                          >
-                            <div className="absolute -top-6 left-0 bg-obsidian-black text-bone-white text-xs px-2 py-1 rounded">
-                              {result.name} ({result.confidence}%)
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    
-                    <button
-                      className="absolute top-4 right-4 bg-obsidian-black/70 text-bone-white p-2 rounded-full hover:bg-obsidian-black transition-colors"
-                      onClick={removeImage}
-                    >
-                      <X className="h-5 w-5" />
-                    </button>
-                  </div>
-                </div>
-
-                {/* Right side: Analysis Results */}
-                <div 
-                  className="lg:w-[65%] flex flex-col justify-between overflow-y-auto"
-                  style={{ 
-                    height: imageContainerHeight > 0 ? `${Math.max(imageContainerHeight, 736)}px` : 'auto'
+            <div ref={imageStageRef} className="relative min-h-0 flex-1 overflow-hidden bg-[#F2EFE7]">
+              <img
+                src={images[imageIndex]}
+                alt={`Uploaded image ${imageIndex + 1}`}
+                className="absolute inset-0 h-full w-full object-contain"
+                onLoad={(event) => setImageSize({ width: event.currentTarget.naturalWidth || 1, height: event.currentTarget.naturalHeight || 1 })}
+              />
+              {regions.length > 0 && imageScale > 0 && (
+                <canvas
+                  ref={maskCanvasRef}
+                  aria-hidden="true"
+                  className="pointer-events-none absolute"
+                  style={{
+                    left: imageOffsetX,
+                    top: imageOffsetY,
+                    width: renderedImageWidth,
+                    height: renderedImageHeight,
                   }}
-                >
-                  {isAnalyzing ? (
-                    <div className="p-6 bg-parchment/10 rounded-lg border border-ash-grey/20 h-full flex items-center justify-center">
-                      <div>
-                        <h2 className="text-2xl mb-6 font-garamond text-gold-leaf text-center">Analyzing Image...</h2>
-                        <div className="space-y-4">
-                          <div className="h-4 bg-ash-grey/20 rounded-full w-full animate-pulse"></div>
-                          <div className="h-4 bg-ash-grey/20 rounded-full w-3/4 animate-pulse"></div>
-                          <div className="h-4 bg-ash-grey/20 rounded-full w-5/6 animate-pulse"></div>
+                />
+              )}
+                {imageScale > 0 && regions.map((region, index) => {
+                  const isSelected = region.id === selectedRegionId
+                  const box = region.boundingBox
+                  const color = isSelected ? '#c18b13' : ['#087e8b', '#a53f58', '#276749', '#6b4c9a'][index % 4]
+                  return (
+                    <button
+                      key={region.id}
+                      type="button"
+                      aria-label={`Select ${region.name}, confidence ${Math.round(region.confidence * 100)} percent`}
+                      onClick={() => selectRegion(region)}
+                      className="absolute border text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0B0B0B]"
+                      style={{
+                        left: imageOffsetX + box.x / 1000 * renderedImageWidth,
+                        top: imageOffsetY + box.y / 1000 * renderedImageHeight,
+                        width: box.width / 1000 * renderedImageWidth,
+                        height: box.height / 1000 * renderedImageHeight,
+                        borderColor: color,
+                        borderWidth: isSelected ? 2 : 1,
+                        backgroundColor: 'transparent',
+                        zIndex: isSelected ? 2 : 1
+                      }}
+                    >
+                      <span className="absolute left-0 top-0 max-w-full truncate bg-[#0B0B0B] px-1.5 py-1 text-xs leading-none text-white" style={{ outline: `1px solid ${color}` }}>
+                        {index + 1}. {getRegionLabel(region)}
+                      </span>
+                    </button>
+                  )
+                })}
+                {manualRegion && imageScale > 0 && (
+                  <div
+                    aria-label="Selected image area"
+                    className="pointer-events-none absolute border-2 border-dashed border-[#e2a817] bg-[#e2a817]/10"
+                    style={{
+                      left: imageOffsetX + manualRegion.x / 1000 * renderedImageWidth,
+                      top: imageOffsetY + manualRegion.y / 1000 * renderedImageHeight,
+                      width: manualRegion.width / 1000 * renderedImageWidth,
+                      height: manualRegion.height / 1000 * renderedImageHeight,
+                      zIndex: 10,
+                    }}
+                  />
+                )}
+                {isDrawingRegion && imageScale > 0 && (
+                  <div
+                    className="absolute inset-0 z-20 cursor-crosshair touch-none"
+                    onPointerDown={(event) => {
+                      const point = getImagePoint(event)
+                      if (!point) return
+                      event.preventDefault()
+                      event.currentTarget.setPointerCapture(event.pointerId)
+                      setDrawStart(point)
+                      setDraftRegion({ x: point.x, y: point.y, width: 0, height: 0 })
+                    }}
+                    onPointerMove={(event) => {
+                      if (!drawStart) return
+                      const point = getImagePoint(event)
+                      if (point) setDraftRegion(boxFromPoints(drawStart, point))
+                    }}
+                    onPointerUp={(event) => {
+                      if (!drawStart) return
+                      const point = getImagePoint(event)
+                      if (point) {
+                        const box = boxFromPoints(drawStart, point)
+                        if (box.width >= 8 && box.height >= 8) {
+                          setManualRegion(box)
+                          setDraftRegion(box)
+                        } else {
+                          setError('Draw a larger box around the symbol.')
+                        }
+                      }
+                      setDrawStart(null)
+                      setIsDrawingRegion(false)
+                    }}
+                    onPointerCancel={() => { setDrawStart(null); setDraftRegion(null); setIsDrawingRegion(false) }}
+                  >
+                    {draftRegion && (
+                      <div
+                        className="pointer-events-none absolute border-2 border-dashed border-[#e2a817] bg-[#e2a817]/10"
+                        style={{
+                          left: imageOffsetX + draftRegion.x / 1000 * renderedImageWidth,
+                          top: imageOffsetY + draftRegion.y / 1000 * renderedImageHeight,
+                          width: draftRegion.width / 1000 * renderedImageWidth,
+                          height: draftRegion.height / 1000 * renderedImageHeight,
+                        }}
+                      />
+                    )}
+                  </div>
+                )}
+                {isSegmenting && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-[#FDFBF6]/75 text-base font-medium text-[#3b352c]">
+                    <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> Finding symbol regions
+                  </div>
+                )}
+            </div>
+            <p className="mt-3 shrink-0 text-sm text-[#595959]">
+              {selectedRegion ? `Selected: ${getRegionLabel(selectedRegion)} Â· ${Math.round(selectedRegion.confidence * 100)}% visual confidence` : manualRegion ? 'Area selected. Analyze it to identify the symbol inside.' : isDrawingRegion ? 'Drag around the symbol or meaningful detail' : 'Select a highlighted region or mark an area manually'}
+            </p>
+          </section>
+
+          <section className="flex min-h-0 flex-col border border-[#3A3A3A]/20 bg-[#FDFBF6]">
+            <div className="flex min-h-[64px] shrink-0 items-center gap-3 border-b border-[#3A3A3A]/20 bg-[#F7ECC8] px-3 py-2">
+              <span className="shrink-0 text-sm font-bold uppercase tracking-widest text-[#595959]">Symbols</span>
+              <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto">
+                {regions.map((region, index) => {
+                  const active = region.id === selectedRegionId
+                  return (
+                    <button
+                      key={region.id}
+                      onClick={() => selectRegion(region)}
+                      aria-pressed={active}
+                      className={`shrink-0 border min-h-11 px-4 py-2 text-base transition-colors ${active ? 'border-[#816719] bg-[#D4AF37] font-bold text-[#0B0B0B]' : 'border-[#d2c7b4] bg-[#FDFBF6] text-[#3A3A3A] hover:bg-[#F7ECC8]'}`}
+                    >
+                      {index + 1}. {getRegionLabel(region)}
+                    </button>
+                  )
+                })}
+                {!regions.length && !isSegmenting && <span className="px-2 py-1 text-base text-[#595959]">No regions found</span>}
+              </div>
+              {selectedRegion && <span className="hidden shrink-0 text-sm tabular-nums text-[#595959] sm:block">{Math.round(selectedRegion.confidence * 100)}%</span>}
+            </div>
+
+            {isSegmenting ? (
+              <div className="flex min-h-0 flex-1 items-center justify-center text-base text-[#3A3A3A]">
+                    <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> Classifying image and segmenting symbols...
+              </div>
+            ) : !selectedRegion ? (
+              <div className="flex min-h-0 flex-1 items-center justify-center px-5 text-center text-base text-[#3A3A3A]">
+                {error || 'No symbol regions are available for this image.'}
+              </div>
+            ) : (
+              <div key={selectedRegion.id} className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-6">
+                {busyRegionId === selectedRegion.id && !selectedAnalysis ? (
+                  <div className="flex h-full min-h-40 items-center justify-center text-base text-[#3A3A3A]">
+                    <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> Analyzing {selectedRegion.name}...
+                  </div>
+                ) : selectedAnalysis ? (
+                  <div className="space-y-6">
+                    <section className="border border-[#3A3A3A]/20 bg-[#FDFBF6] p-5 sm:p-6">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div>
+                          <p className="text-sm font-bold uppercase tracking-widest text-[#595959]">Image classification</p>
+                          <h2 className="mt-1 font-garamond text-2xl font-bold capitalize">{selectedAnalysis.imageType.replace(/_/g, ' ')}</h2>
+                        </div>
+                        <span className="border border-[#d4c6a8] bg-[#F7ECC8] px-2 py-1 text-base text-[#3A3A3A]">{selectedAnalysis.dominantSubject}</span>
+                      </div>
+                      <div className="mt-3 grid gap-5 2xl:grid-cols-2">
+                        <div className="py-2">
+                          <p className="text-xs font-bold uppercase tracking-widest text-[#595959]">Selected symbol</p>
+                          <p className="mt-1 text-base font-medium">{selectedAnalysis.name || selectedRegion.name}</p>
+                        </div>
+                        <div className="py-2">
+                          <p className="text-xs font-bold uppercase tracking-widest text-[#595959]">Other motifs</p>
+                          <p className="mt-1 text-base">{selectedAnalysis.embeddedSymbols.length ? selectedAnalysis.embeddedSymbols.join(', ') : 'None identified'}</p>
                         </div>
                       </div>
-                    </div>
-                  ) : detectionResults && selectedSymbol !== null ? (
-                    <div className="flex flex-col h-full">
-                      {/* Symbol Tabs - Right below the image */}
-                      <div className="rounded-lg border border-ash-grey/10 bg-parchment mb-5 flex-shrink-0">
-                        <div className="flex overflow-x-auto py-2 px-3 gap-2">
-                          {detectionResults.map((result, index) => (
-                            <button
-                              key={index}
-                              onClick={() => {
-                                setSelectedSymbol(index)
-                                setActiveSymbol(index)
-                              }}
-                              className={`px-5 py-2 rounded-md text-sm font-medium whitespace-nowrap transition-all ${
-                                activeSymbol === index 
-                                  ? 'bg-gold-leaf text-obsidian-black' 
-                                  : 'bg-sand-salt hover:bg-sand-salt/80 text-ash-grey'
-                              }`}
-                            >
-                              {result.name}
-                            </button>
+                      <p className="mt-2 py-2 text-base leading-relaxed text-[#3A3A3A]">{selectedAnalysis.classificationReasoning}</p>
+                    </section>
+
+                    <div className="grid gap-5 2xl:grid-cols-2">
+                      <section className="border border-[#3A3A3A]/20 bg-[#FDFBF6] p-5 sm:p-6">
+                        <div className="mb-3 flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <h3 className="break-words font-garamond text-2xl font-bold">{selectedAnalysis.name || selectedRegion.name}</h3>
+                            <p className="text-base text-[#595959]">{selectedAnalysis.category || selectedRegion.category}</p>
+                          </div>
+                          <Link href={`/library/symbol/${(selectedAnalysis.name || selectedRegion.name).toLowerCase().replace(/\s+/g, '-')}`}>
+                            <Button variant="outline" size="sm" className="h-11 shrink-0 rounded-none border-[#3A3A3A]/20 px-2 text-sm">
+                              Library <ExternalLink size={16} className="ml-1" />
+                            </Button>
+                          </Link>
+                        </div>
+                        <div className="space-y-5">
+                          {[
+                            ['Confidence', selectedAnalysis.confidence],
+                            ['Prominence', selectedAnalysis.prominence],
+                            ['Authenticity', selectedAnalysis.authenticity]
+                          ].map(([label, value]) => (
+                            <div key={label as string}>
+                              <div className="mb-1 flex justify-between text-base"><span>{label}</span><span>{Number(value).toFixed(1)} / 10</span></div>
+                              <div className="h-2 border border-[#3A3A3A]/15 bg-[#F7ECC8]"><div className="h-full bg-[#D4AF37]" style={{ width: `${Number(value) * 10}%` }} /></div>
+                            </div>
                           ))}
                         </div>
-                      </div>
-                      
-                      {/* 2x2 Grid of Cards - Wider than tall */}
-                      <div className="grid grid-cols-2 gap-5 overflow-y-auto pr-1">
-                        {/* Scores Card - Top Left */}
-                        <div className="bg-parchment rounded-lg border border-ash-grey/20 overflow-hidden">
-                          <div className="p-5">
-                            <div className="flex justify-between items-start mb-4">
-                              <div>
-                                <h3 className="text-lg font-garamond font-medium">{detectionResults[selectedSymbol].name}</h3>
-                                <p className="text-sm text-ash-grey">{detectionResults[selectedSymbol].category}</p>
-                              </div>
-                              <Link href={`/library/symbol/${detectionResults[selectedSymbol].name.toLowerCase().replace(/\s+/g, '-')}`}>
-                                <Button variant="outline" size="sm" className="flex items-center gap-1 text-xs">
-                                  View in Library
-                                  <ExternalLink size={12} />
-                                </Button>
-                              </Link>
-                            </div>
-                          
-                            <div className="space-y-4">
-                              <div className="space-y-1.5">
-                                <div className="flex justify-between">
-                                  <span className="font-medium text-sm">Confidence</span>
-                                  <span className="font-medium text-sm">{(detectionResults[selectedSymbol].confidence).toFixed(1)}</span>
-                                </div>
-                                <div className="h-6 bg-gray-100 rounded-full overflow-hidden relative">
-                                  <div 
-                                    className={`h-full ${getScoreGradient(detectionResults[selectedSymbol].confidence)} transition-all duration-500`}
-                                    style={{ width: `${detectionResults[selectedSymbol].confidence * 10}%` }}
-                                  >
-                                  </div>
-                                </div>
-                              </div>
+                      </section>
 
-                              <div className="space-y-1.5">
-                                <div className="flex justify-between">
-                                  <span className="font-medium text-sm">Prominence</span>
-                                  <span className="font-medium text-sm">{(detectionResults[selectedSymbol].prominence).toFixed(1)}</span>
-                                </div>
-                                <div className="h-6 bg-gray-100 rounded-full overflow-hidden relative">
-                                  <div 
-                                    className={`h-full ${getScoreGradient(detectionResults[selectedSymbol].prominence)} transition-all duration-500`}
-                                    style={{ width: `${detectionResults[selectedSymbol].prominence * 10}%` }}
-                                  >
-                                  </div>
-                                </div>
-                              </div>
+                      <section className="border border-[#3A3A3A]/20 bg-[#FDFBF6] p-5 sm:p-6">
+                        <h3 className="mb-2 font-garamond text-2xl font-bold">Overall score</h3>
+                        <div className="flex items-start gap-2 py-2">
+                          <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#816719]" />
+                          <div><p className="font-garamond text-5xl font-bold">{score}<span className="ml-2 font-lato text-base font-normal text-[#595959]">/ 10</span></p><p className="mt-1 text-base leading-relaxed text-[#3A3A3A]">{selectedAnalysis.overallScoreRationale || 'Weighted from confidence, prominence, and authenticity.'}</p></div>
+                        </div>
+                        <p className="mt-2 text-base leading-relaxed text-[#3A3A3A]">This score summarizes how strongly the visual evidence and historical context support the identification.</p>
+                      </section>
 
-                              <div className="space-y-1.5">
-                                <div className="flex justify-between">
-                                  <span className="font-medium text-sm">Authenticity</span>
-                                  <span className="font-medium text-sm">{(detectionResults[selectedSymbol].authenticity).toFixed(1)}</span>
-                                </div>
-                                <div className="h-6 bg-gray-100 rounded-full overflow-hidden relative">
-                                  <div 
-                                    className={`h-full ${getScoreGradient(detectionResults[selectedSymbol].authenticity)} transition-all duration-500`}
-                                    style={{ width: `${detectionResults[selectedSymbol].authenticity * 10}%` }}
-                                  >
-                                  </div>
-                                </div>
+                      <section className="border border-[#3A3A3A]/20 bg-[#FDFBF6] p-5 sm:p-6 2xl:col-span-2">
+                        <h3 className="mb-2 font-garamond text-2xl font-bold">Source & origin</h3>
+                        <div className="grid gap-5 2xl:grid-cols-2">
+                          <div className="py-2">
+                            <p className="text-xs font-bold uppercase tracking-widest text-[#595959]">Context</p>
+                            <p className="mt-1 text-base leading-relaxed text-[#3A3A3A]">{selectedAnalysis.contextDescription || 'No historical context returned.'}</p>
+                          </div>
+                          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                            {[
+                              ['Origin', selectedAnalysis.origin],
+                              ['Time period', selectedAnalysis.timePeriod],
+                              ['Primary use', selectedAnalysis.primaryUse],
+                              ['Cultural prevalence', selectedAnalysis.culturalPrevalence]
+                            ].map(([label, value]) => (
+                              <div key={label} className="min-w-0 py-2">
+                                <p className="text-xs font-bold uppercase tracking-wider text-[#595959]">{label}</p>
+                                <p className="mt-1 break-words text-base">{value}</p>
                               </div>
-                            </div>
+                            ))}
                           </div>
                         </div>
-                        
-                        {/* Overall Score Card - Top Right */}
-                        <div className="bg-parchment rounded-lg border border-ash-grey/20 overflow-hidden">
-                          <div className="p-5">
-                            <h3 className="text-lg font-garamond font-medium mb-5">Overall Score</h3>
-                            
-                            <div className="bg-sand-salt p-4 rounded-md border border-ash-grey/10 flex items-start space-x-3 mb-5">
-                              <Info className="h-5 w-5 text-gold-leaf shrink-0 mt-0.5" />
-                              <div>
-                                <h4 className="text-sm font-medium mb-1">Score: {calculateOverallScore(detectionResults[selectedSymbol])} / 10</h4>
-                                <p className="text-xs text-ash-grey overflow-y-auto max-h-[80px]">
-                                  {detectionResults[selectedSymbol].overallScoreRationale || 
-                                    "This score represents our system's analysis of this symbol's confidence, prominence, and authenticity."}
-                                </p>
-                              </div>
-                            </div>
-                            
-                            <div className="space-y-3 text-sm text-ash-grey mb-3">
-                              <p>The score evaluates the symbol against our database of historical and contemporary symbols.</p>
-                              <p>Higher scores indicate stronger matches with verified authentic symbols from our collections.</p>
-                            </div>
-                          </div>
-                        </div>
+                      </section>
 
-                        {/* Source & Origin Card - Bottom Left */}
-                        <div className="bg-parchment rounded-lg border border-ash-grey/20 overflow-hidden">
-                          <div className="p-5">
-                            <h3 className="text-lg font-garamond font-medium mb-5">Source & Origin</h3>
-                            
-                            <div className="bg-sand-salt p-4 rounded-md border border-ash-grey/10 mb-5 max-h-[150px] overflow-y-auto">
-                              <h4 className="text-sm font-medium mb-1">Context</h4>
-                              <p className="text-xs text-ash-grey">
-                                {detectionResults[selectedSymbol].contextDescription || 
-                                  `${detectionResults[selectedSymbol].name} has been used in various cultures throughout history.`}
-                              </p>
-                            </div>
-                            
-                            <div className="grid grid-cols-2 gap-3 mb-3">
-                              <div className="p-3 bg-sand-salt rounded-md border border-ash-grey/10">
-                                <h5 className="text-xs text-ash-grey mb-1">Origin</h5>
-                                <p className="font-medium text-sm">{detectionResults[selectedSymbol].origin}</p>
-                              </div>
-                              <div className="p-3 bg-sand-salt rounded-md border border-ash-grey/10">
-                                <h5 className="text-xs text-ash-grey mb-1">Time Period</h5>
-                                <p className="font-medium text-sm">{detectionResults[selectedSymbol].timePeriod}</p>
-                              </div>
-                              <div className="p-3 bg-sand-salt rounded-md border border-ash-grey/10">
-                                <h5 className="text-xs text-ash-grey mb-1">Primary Use</h5>
-                                <p className="font-medium text-sm">{detectionResults[selectedSymbol].primaryUse}</p>
-                              </div>
-                              <div className="p-3 bg-sand-salt rounded-md border border-ash-grey/10">
-                                <h5 className="text-xs text-ash-grey mb-1">Cultural Prevalence</h5>
-                                <p className="font-medium text-sm">{detectionResults[selectedSymbol].culturalPrevalence}</p>
-                              </div>
-                            </div>
+                      <section className="border border-[#3A3A3A]/20 bg-[#FDFBF6] p-5 sm:p-6 2xl:col-span-2">
+                        <h3 className="mb-2 font-garamond text-2xl font-bold">Visual analysis</h3>
+                        <div className="grid gap-5">
+                          <p className="py-2 text-base leading-relaxed text-[#3A3A3A]">{selectedAnalysis.description}</p>
+                          <div className="space-y-3 border-l-2 border-[#D4AF37]/50 pl-4 py-2">
+                            {selectedAnalysis.thinkingProcess.length ? selectedAnalysis.thinkingProcess.map((thought, index) => (
+                              <p key={index} className="text-base leading-relaxed text-[#3A3A3A]">{index + 1}. {thought}</p>
+                            )) : <p className="text-base text-[#3A3A3A]">No analysis notes supplied.</p>}
                           </div>
                         </div>
-                        
-                        {/* Visual Analysis Card - Bottom Right */}
-                        <div className="bg-parchment rounded-lg border border-ash-grey/20 overflow-hidden">
-                          <div className="p-5">
-                            <h3 className="text-lg font-garamond font-medium mb-5">Visual Analysis</h3>
-                            
-                            <div className="max-h-[100px] overflow-y-auto mb-5">
-                              <p className="text-sm text-ash-grey">
-                                {detectionResults[selectedSymbol].description}
-                              </p>
-                            </div>
-                            
-                            <div className="bg-sand-salt p-4 rounded-md border border-ash-grey/10 space-y-2 mb-5 max-h-[100px] overflow-y-auto">
-                              {thinkingProcessData[selectedSymbol || 0]?.thinking?.map((thought, idx) => (
-                                <div key={idx} className="flex items-start gap-2">
-                                  <div className="h-2 w-2 rounded-full bg-gold-leaf mt-1.5"></div>
-                                  <p className="text-xs text-ash-grey">{thought}</p>
-                                </div>
-                              ))}
-                              {(!thinkingProcessData[selectedSymbol || 0]?.thinking || thinkingProcessData[selectedSymbol || 0]?.thinking.length === 0) && (
-                                <p className="text-xs text-ash-grey">Analysis process will appear here when available.</p>
-                              )}
-                            </div>
-                            
-                            <div className="grid grid-cols-2 gap-3 mb-3">
-                              <div className="p-3 bg-sand-salt rounded-md border border-ash-grey/10">
-                                <h5 className="text-xs text-ash-grey mb-1">Visual Complexity</h5>
-                                <p className="font-medium text-sm">{detectionResults[selectedSymbol].visualComplexity}</p>
-                              </div>
-                              <div className="p-3 bg-sand-salt rounded-md border border-ash-grey/10">
-                                <h5 className="text-xs text-ash-grey mb-1">Key Elements</h5>
-                                <p className="font-medium text-sm">{detectionResults[selectedSymbol].keyElements}</p>
-                              </div>
-                            </div>
-                          </div>
+                        <div className="mt-2 grid gap-5 2xl:grid-cols-2">
+                          <div className="py-2"><p className="text-xs font-bold uppercase tracking-wider text-[#595959]">Visual complexity</p><p className="mt-1 text-base">{selectedAnalysis.visualComplexity}</p></div>
+                          <div className="py-2"><p className="text-xs font-bold uppercase tracking-wider text-[#595959]">Key elements</p><p className="mt-1 text-base">{selectedAnalysis.keyElements}</p></div>
                         </div>
-                      </div>
+                      </section>
                     </div>
-                  ) : (
-                    <div className="flex items-center justify-center h-full bg-parchment/10 rounded-lg border border-ash-grey/20 p-8">
-                      <p className="text-ash-grey text-center">Select a symbol from the image to view analysis</p>
-                    </div>
-                  )}
-                </div>
-              </div>
-              
-              {/* Pagination Controls */}
-              {uploadedImages.length > 0 && !isAnalyzing && (
-                <div className="flex justify-center items-center mt-8 mb-4">
-                  <button 
-                    className={`flex items-center px-4 py-2 rounded-lg border border-ash-grey/10 ${
-                      currentImageIndex > 0 
-                        ? 'text-ash-grey hover:text-gold-leaf hover:bg-sand-salt'
-                        : 'text-ash-grey/40 cursor-not-allowed'
-                    }`}
-                    onClick={goToPrevImage}
-                    disabled={currentImageIndex === 0}
-                  >
-                    <ChevronLeft size={20} className="mr-2" />
-                    <span>Previous Image</span>
-                  </button>
-                  <div className="mx-6 px-6 py-2 bg-sand-salt rounded-lg border border-ash-grey/10 text-ash-grey font-medium">
-                    {currentImageIndex + 1} / {uploadedImages.length}
                   </div>
-                  <button 
-                    className={`flex items-center px-4 py-2 rounded-lg border border-ash-grey/10 ${
-                      currentImageIndex < uploadedImages.length - 1 
-                        ? 'text-ash-grey hover:text-gold-leaf hover:bg-sand-salt'
-                        : 'text-ash-grey/40 cursor-not-allowed'
-                    }`}
-                    onClick={goToNextImage}
-                    disabled={currentImageIndex >= uploadedImages.length - 1}
-                  >
-                    <span>Next Image</span>
-                    <ChevronRight size={20} className="ml-2" />
-                  </button>
-                </div>
-              )}
+                ) : (
+                  <div className="flex h-full min-h-40 items-center justify-center text-base text-[#3A3A3A]">
+                    <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> Analyzing {selectedRegion.name}...
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
 
-              {/* Error display in the UI */}
-              {error && (
-                <div className="p-4 mb-4 bg-red-50 text-red-800 border border-red-200 rounded-md">
-                  <p className="flex items-center">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                    </svg>
-                    {error}
-                  </p>
-                  <p className="text-sm mt-2">The analysis is continuing with sample data for demonstration purposes.</p>
-                </div>
-              )}
-            </div>
-          )}
+          {error && <p role="alert" className="absolute bottom-3 left-1/2 z-10 max-w-[90%] -translate-x-1/2 border border-[#c9958c] bg-[#f7e7e3] px-3 py-2 text-base text-[#672c29]">{error}</p>}
         </div>
-      </div>
+      )}
     </div>
   )
 }
