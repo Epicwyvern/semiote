@@ -1,294 +1,128 @@
-import { NextResponse } from 'next/server';
+import { NextResponse } from 'next/server'
+import { z } from 'zod'
+import { lookupWikipedia, lookupBooks, uniqueSources, referenceImage, citationPassages, normalizedName } from '@/lib/symbol-research'
+import { observationsSchema, identificationSchema, observationInstructions, comparisonInstructions, verificationSchema, verificationInstructions, candidateNames, assembleAnalysis, type Verification, type Identification, type VerificationDiagnostic } from '@/lib/symbol-recognition'
 
-const DEFAULT_MODEL = 'gpt-4o-mini';
+export const maxDuration = 300
+const image = z.string().max(20_000_000).regex(/^data:image\/(?:png|jpeg|webp|gif);base64,/)
+const requestSchema = z.object({
+  imageDataUrl: image.optional(), imageBase64: z.string().max(18_000_000).optional(),
+  targetImageDataUrl: image.optional(), contextImageDataUrl: image.optional(),
+  selectionKind: z.enum(['painted', 'region']).optional(),
+  boundingBox: z.object({ x: z.number().min(0), y: z.number().min(0), width: z.number().positive(), height: z.number().positive(), coordinateScale: z.literal(1000).optional() })
+    .refine(box => box.x + box.width <= 1000.001 && box.y + box.height <= 1000.001).optional(),
+})
+type Content = { type: 'input_text'; text: string } | { type: 'input_image'; image_url: string; detail: 'high' | 'low' }
 
-type ResponsesApiResult = {
-  output?: Array<{
-    content?: Array<{
-      type?: string;
-      text?: string;
-    }>;
-  }>;
-};
-
-type ImageClassificationResult = {
-  imageType?: string;
-  dominantSubject?: string;
-  dominantSymbol?: string | null;
-  embeddedSymbols?: string[];
-  reasoning?: string;
-  symbolDensity?: string;
-};
-
-async function requestOpenAI(
-  imageDataUrl: string,
-  prompt: string,
-  json = false
-): Promise<string> {
-  const apiKey = process.env.OPENAI_API_KEY;
-
-  if (!apiKey) {
-    throw new Error('OPENAI_API_KEY is not configured');
-  }
-
-  const response = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: process.env.OPENAI_VISION_MODEL || DEFAULT_MODEL,
-      input: [
-        {
-          role: 'user',
-          content: [
-            { type: 'input_text', text: prompt },
-            { type: 'input_image', image_url: imageDataUrl, detail: 'auto' },
-          ],
-        },
-      ],
-      ...(json ? { text: { format: { type: 'json_object' } } } : {}),
-      max_output_tokens: json ? 2000 : 100,
-    }),
-  });
-
-  const result = await response.json() as ResponsesApiResult & {
-    error?: { message?: string };
-  };
-
-  if (!response.ok) {
-    throw new Error(result.error?.message || `OpenAI request failed (${response.status})`);
-  }
-
-  const text = result.output
-    ?.flatMap((item) => item.content || [])
-    .find((content) => content.type === 'output_text')?.text;
-
-  if (!text) {
-    throw new Error('OpenAI returned an empty response');
-  }
-
-  return text;
+class RecognitionStageError extends Error {
+  constructor(readonly code: string, message: string) { super(message) }
+}
+function stageDiagnostic(stage: VerificationDiagnostic['stage'], error: unknown): VerificationDiagnostic {
+  if (error instanceof z.ZodError) return { stage, code: 'invalid_schema', message: 'The model response did not match the required structure.', fields: error.issues.map(issue => `${issue.path.join('.')}: ${issue.code}`).slice(0, 20) }
+  if (error instanceof SyntaxError) return { stage, code: 'invalid_json', message: 'The model returned invalid JSON.' }
+  if (error instanceof RecognitionStageError) return { stage, code: error.code, message: error.message }
+  if (error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)) return { stage, code: 'timeout', message: 'The request exceeded its time limit.' }
+  return { stage, code: 'request_failed', message: 'The model request could not be completed.' }
 }
 
-function parseJsonField(raw: string, fallback: Record<string, unknown>) {
-  try {
-    return JSON.parse(raw) as Record<string, unknown>;
-  } catch {
-    return fallback;
+async function vision(instructions: string, content: Content[]) {
+  const apiKey = process.env.OPENAI_API_KEY
+  if (!apiKey) throw new Error('OPENAI_API_KEY is not configured')
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    cache: 'no-store', signal: AbortSignal.timeout(45000),
+    body: JSON.stringify({ model: process.env.OPENAI_RECOGNITION_MODEL || process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini',
+      input: [{ role: 'system', content: instructions }, { role: 'user', content }],
+      text: { format: { type: 'json_object' } }, max_output_tokens: 10000,
+    }),
+  })
+  const data = await response.json() as { status?: string; incomplete_details?: { reason?: string }; error?: { message?: string }; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> }
+  if (!response.ok) throw new RecognitionStageError(`http_${response.status}`, `The model service returned HTTP ${response.status}.`)
+  if (data.status === 'incomplete') throw new RecognitionStageError('incomplete_output', 'The model response was incomplete; it may have exceeded the output limit.')
+  const raw = data.output?.flatMap(item => item.content || []).find(item => item.type === 'output_text')?.text
+  if (!raw) throw new RecognitionStageError('empty_output', 'The model returned no structured result.')
+  // Malformed output is an error, never a fabricated successful identification.
+  return JSON.parse(raw) as unknown
+}
+
+async function validatedVision<S extends z.ZodTypeAny>(schema: S, instructions: string, content: Content[]): Promise<z.output<S>> {
+  let correction: Content[] = []
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { return schema.parse(await vision(instructions, [...content, ...correction])) }
+    catch (error) {
+      if (attempt || !(error instanceof z.ZodError || error instanceof SyntaxError)) throw error
+      const issues = error instanceof z.ZodError ? error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ') : 'Invalid JSON syntax'
+      correction = [{ type: 'input_text', text: `Return the complete required JSON shape. The previous response failed validation: ${issues}. Use actual JSON null where appropriate, numbers for scores, arrays for feature lists, and only the enumerated status values. Do not fabricate an identity to satisfy the format.` }]
+    }
   }
+  throw new Error('No valid recognition result')
 }
 
 export async function POST(request: Request) {
+  let body: z.infer<typeof requestSchema>
+  try { body = requestSchema.parse(await request.json()) }
+  catch { return NextResponse.json({ error: 'Invalid image or selected region' }, { status: 400 }) }
+  const original = body.contextImageDataUrl || body.imageDataUrl || (body.imageBase64 ? `data:image/jpeg;base64,${body.imageBase64}` : '')
+  if (!original) return NextResponse.json({ error: 'Image data is required' }, { status: 400 })
+  let stage = 'observations'
   try {
-    const { imageDataUrl, imageBase64, boundingBox, symbolName: requestedSymbolName } = await request.json();
-    const resolvedImageDataUrl = imageDataUrl || (imageBase64 ? `data:image/jpeg;base64,${imageBase64}` : '');
+    const target = body.targetImageDataUrl || body.imageDataUrl || original
+    const images: Content[] = [
+      { type: 'input_text', text: body.selectionKind === 'painted' ? 'EXACT PAINTED SELECTION: only these source pixels were selected; omitted strokes are unknown.' : 'TARGET CLOSE-UP: inspect this symbol.' },
+      { type: 'input_image', image_url: target, detail: 'high' },
+    ]
+    if (target !== original) images.push({ type: 'input_text', text: `ORIGINAL CONTEXT. Target bounds in original normalized 0-1000 coordinates: ${JSON.stringify(body.boundingBox || null)}. Identify the close-up, not a different nearby motif.` }, { type: 'input_image', image_url: original, detail: 'high' })
+    else if (body.boundingBox) images.unshift({ type: 'input_text', text: `Inspect only this normalized 0-1000 region in the supplied image: ${JSON.stringify(body.boundingBox)}` })
 
-    if (!resolvedImageDataUrl) {
-      return NextResponse.json(
-        { error: 'Image data is required' },
-        { status: 400 }
-      );
-    }
-
-    const classificationPrompt = `
-You are evaluating an image before symbol analysis. Decide what kind of visual content this is and whether the image contains one dominant symbol or multiple embedded symbols.
-
-Return JSON with this exact structure:
-{
-  "imageType": "single_symbol" | "object_with_symbol" | "symbolic_scene" | "ornamental_pattern" | "ambiguous",
-  "dominantSubject": "short description of the main subject",
-  "dominantSymbol": "best single symbol label if one is present, otherwise null",
-  "embeddedSymbols": ["up to 5 candidate motifs or sub-symbols found inside the image"],
-  "symbolDensity": "single" | "moderate" | "dense",
-  "reasoning": "2-3 sentences explaining the classification"
-}
-
-Important:
-- If the image is mostly one central emblem, classify as \"single_symbol\".
-- If the image is an object with a symbol painted or carved onto it, classify as \"object_with_symbol\".
-- If the image contains many repeated or surrounding symbolic forms, classify as \"symbolic_scene\".
-- If the image is mostly abstract decorative geometry with unclear symbolic meaning, classify as \"ornamental_pattern\".
-- Do not return markdown or extra text outside JSON.
-`;
-
-    const classificationRaw = await requestOpenAI(resolvedImageDataUrl, classificationPrompt, true);
-    const classification = parseJsonField(classificationRaw, {
-      imageType: 'ambiguous',
-      dominantSubject: 'unknown',
-      dominantSymbol: null,
-      embeddedSymbols: [],
-      symbolDensity: 'single',
-      reasoning: 'Unable to classify the image confidently.'
-    }) as ImageClassificationResult;
-
-    const imageType = classification.imageType || 'ambiguous';
-    const dominantSubject = classification.dominantSubject || 'unknown';
-    const dominantSymbol = classification.dominantSymbol || null;
-    const embeddedSymbols = Array.isArray(classification.embeddedSymbols) ? classification.embeddedSymbols : [];
-    const symbolDensity = classification.symbolDensity || 'single';
-
-    const initialPrompt = `
-You are identifying the primary symbol ${boundingBox ? 'inside the selected image region' : 'in the image'}. If the image is an object with symbol decoration, name the symbol rather than the object itself.
-
-Current image classification:
-- imageType: ${imageType}
-- dominantSubject: ${dominantSubject}
-- symbolDensity: ${symbolDensity}
-- embeddedSymbols: ${embeddedSymbols.length ? embeddedSymbols.join(', ') : 'none'}
-${boundingBox ? `- selectedRegion (normalized 0-1000 coordinates): ${JSON.stringify(boundingBox)}\n- candidateRegionLabel (verify visually): ${typeof requestedSymbolName === 'string' ? requestedSymbolName.slice(0, 100) : 'none'}` : ''}
-
-${boundingBox ? `Analyze the symbol inside this selected image region, whose normalized 0-1000 bounding box is ${JSON.stringify(boundingBox)}. Identify the symbol inside the box even if it is a secondary motif in the full composition.${typeof requestedSymbolName === 'string' ? ` The segment detector labeled this region "${requestedSymbolName}"; verify that label against the image rather than blindly accepting it.` : ''}` : 'Analyze the most prominent symbol in the full image.'}
-
-Return JSON with this exact structure:
-{
-  "name": "primary symbol name",
-  "category": "symbol category",
-  "reasoning": "brief explanation"
-}
-
-If a region is selected, identify only the symbol inside that region, even if it is a secondary motif in the full composition. Verify any candidate label against the image. If there is no clear standalone symbol in the selected region, return the most likely symbolic motif in that region. Do not substitute the overall composition for a selected embedded motif.
-Do not return markdown or extra text outside JSON.
-`;
-
-    const initialResult = parseJsonField(
-      await requestOpenAI(resolvedImageDataUrl, initialPrompt, true),
-      { name: dominantSymbol || 'Unknown Symbol', category: 'General', reasoning: 'No clear primary symbol identified.' }
-    ) as { name?: string; category?: string; reasoning?: string };
-
-    const symbolName = (initialResult.name || dominantSymbol || 'Unknown Symbol').trim();
-
-    const wikiResponse = await fetch(new URL('/api/wikiLookup', request.url).toString(), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbolName })
-    });
-
-    const wikiData = await wikiResponse.json();
-
-    let booksData = 'Unable to retrieve book information at this time.';
-    let booksInfoAvailable = false;
-
+    const observations = await validatedVision(observationsSchema, observationInstructions, images)
+    const names = candidateNames(observations)
+    // Unrelated search results can be rejected in the comparison. They are not
+    // automatically accepted as references for the photographed symbol.
+    const wiki = await Promise.all(names.map(name => lookupWikipedia(name)))
+    const sources = uniqueSources(wiki.flatMap(result => result.sources))
+    const passages = citationPassages(sources)
+    const research = sources.map(source => ({ ...source, passages: passages.filter(passage => passage.sourceId === source.id) }))
+    const referenceImages = await Promise.all(sources.filter(source => source.imageUrl).slice(0, 3).map(async source => ({ source, image: await referenceImage(source) })))
+    const references: Content[] = referenceImages.flatMap(({ source, image }) => image ? [
+      { type: 'input_text' as const, text: `REFERENCE ONLY (not the target): ${source.id}, ${source.title}. Compare the drawing's structure; do not assume it matches.` },
+      { type: 'input_image' as const, image_url: image, detail: 'high' as const },
+    ] : [])
+    const diagnostics: VerificationDiagnostic[] = wiki.flatMap((result, index) => result.status === 'unavailable' ? [{ stage: 'lookup' as const, code: result.failureCode || 'lookup_unavailable', message: `Reference lookup was unavailable for ${names[index]}.` }] : [])
+    stage = 'comparison'
+    let identification: Identification | undefined
     try {
-      const booksResponse = await fetch(new URL('/api/googleBooksLookup', request.url).toString(), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbolName }),
-      });
-
-      if (booksResponse.ok) {
-        const booksResult = await booksResponse.json();
-
-        if (booksResult.success) {
-          booksData = booksResult.bookData;
-          booksInfoAvailable = true;
-
-          if (booksResult.note && booksResult.note.includes('sample data')) {
-            console.log('Using sample book data:', booksResult.note);
-          }
-        } else {
-          console.error('Google Books lookup returned failure:', booksResult);
-        }
-      } else {
-        console.error(`Google Books lookup failed with status: ${booksResponse.status}`);
-      }
+      if (sources.length) identification = await validatedVision(identificationSchema, comparisonInstructions, [
+      ...images, { type: 'input_text', text: JSON.stringify({ observations, candidateNames: names, research, referenceImageSourceIds: referenceImages.filter(item => item.image).map(item => item.source.id) }) }, ...references,
+      ])
+    } catch (error) { const diagnostic = stageDiagnostic('comparison', error); diagnostics.push(diagnostic); console.warn('Reference processing:', diagnostic) }
+    let audit: Verification | undefined
+    try {
+      if (identification) audit = await validatedVision(verificationSchema, verificationInstructions, [
+        ...images,
+        { type: 'input_text', text: JSON.stringify({ candidateNames: names, research,
+          // Do not give the auditor a preferred name, status or proposed verdict.
+          comparisons: identification.comparisons.map(({ candidateName, referenceDefinition, requiredFeatures, checks }) => ({ candidateName, referenceDefinition, requiredFeatures, checks })),
+        }) }, ...references,
+      ])
     } catch (error) {
-      console.error('Error during Google Books lookup:', error);
+      const diagnostic = stageDiagnostic('audit', error); diagnostics.push(diagnostic); console.warn('Reference processing:', diagnostic)
     }
+    const preferred = observations.visualIdentification.selectedCandidateName
+    const preferredLookups = wiki.filter((_, index) => normalizedName(names[index]) === normalizedName(preferred || ''))
+    const lookupStatus = preferredLookups.some(result => result.sources.length) ? 'available' : preferredLookups.some(result => result.status === 'unavailable') ? 'unavailable' : 'no_results'
+    const analysis = assembleAnalysis(observations, identification, names, sources, audit, { lookupStatus, comparisonAvailable: Boolean(identification), diagnostics })
+    // Book search is supplementary reading after identification, not evidence
+    // that can turn a loose keyword match into a named visual identity.
+    const books = analysis.visualIdentification.selectedCandidateName ? await lookupBooks(analysis.visualIdentification.selectedCandidateName) : { sources: [], status: 'no_results' as const }
+    const furtherReading = books.sources
 
-    const enhancedPrompt = `
-You are an expert in symbolic analysis with deep knowledge of historical, religious, and cultural symbols.
-
-IMAGE CLASSIFICATION:
-- imageType: ${imageType}
-- dominantSubject: ${dominantSubject}
-- symbolDensity: ${symbolDensity}
-- embeddedSymbols: ${embeddedSymbols.length ? embeddedSymbols.join(', ') : 'none'}
-
-PRIMARY SYMBOL CANDIDATE: ${symbolName}
-
-RESEARCH FROM WIKIPEDIA:
-${wikiData.success ? wikiData.info : 'No Wikipedia information available'}
-
-RESEARCH FROM BOOKS:
-${booksData}
-
-Analyze the image as a ${imageType} and determine whether the symbol is a single dominant emblem or a scene that includes embedded motifs.${boundingBox ? ` Focus on the selected region, specified in normalized 0-1000 image coordinates: ${JSON.stringify(boundingBox)}.` : ''}
-
-Return JSON with the following structure:
-{
-  "name": string,
-  "category": string,
-  "confidence": number (0-10),
-  "prominence": number (0-10),
-  "authenticity": number (0-10),
-  "description": string,
-  "overallScoreRationale": string,
-  "contextDescription": string,
-  "origin": string,
-  "timePeriod": string,
-  "primaryUse": string,
-  "culturalPrevalence": string,
-  "visualComplexity": string,
-  "keyElements": string,
-  "thinkingProcess": [string],
-  "imageType": "single_symbol" | "object_with_symbol" | "symbolic_scene" | "ornamental_pattern" | "ambiguous",
-  "dominantSubject": string,
-  "embeddedSymbols": [string],
-  "classificationReasoning": string
-}
-
-Important:
-- Return confidence, prominence, and authenticity as numbers from 0 to 10, not fractions from 0 to 1.
-- For a single emblem, the dominant symbol is central and primary.
-- For an object with a symbol decoration, call out both the object and the symbol.
-- For a symbolic scene, include multiple embedded motifs when relevant.
-- Keep the output valid JSON and do not include markdown fences.
-`;
-
-    const analysisResult = parseJsonField(
-      await requestOpenAI(resolvedImageDataUrl, enhancedPrompt, true),
-      {
-        name: symbolName,
-        category: initialResult.category || 'General',
-        confidence: 7,
-        prominence: 7,
-        authenticity: 7,
-        description: 'Image analyzed with layered symbol classification.',
-        overallScoreRationale: 'Score based on visual prominence and cultural context.',
-        contextDescription: 'Classification completed with available image context.',
-        origin: 'Unknown',
-        timePeriod: 'Unknown',
-        primaryUse: 'Unknown',
-        culturalPrevalence: 'Unknown',
-        visualComplexity: 'Medium',
-        keyElements: embeddedSymbols.join(', ') || 'Symbolic form',
-        thinkingProcess: ['Classified the image type first.', 'Identified the dominant symbolic motif.', 'Checked for embedded sub-symbols.'],
-        imageType,
-        dominantSubject,
-        embeddedSymbols,
-        classificationReasoning: classification.reasoning || 'Image classified based on visual composition.'
-      }
-    ) as Record<string, unknown>;
-
-    return NextResponse.json({
-      success: true,
-      initialIdentification: symbolName,
-      imageType,
-      dominantSubject,
-      dominantSymbol,
-      embeddedSymbols,
-      classificationReasoning: classification.reasoning || 'Image classified based on visual composition.',
-      wikiInfoAvailable: wikiData.success,
-      booksInfoAvailable,
-      analysis: analysisResult
-    });
+    return NextResponse.json({ success: true, analysis, observations,
+      wikiInfoAvailable: wiki.some(result => result.sources.length > 0),
+      booksInfoAvailable: furtherReading.length > 0, furtherReading,
+      researchStatus: { wikipedia: wiki.map((result, index) => ({ candidate: names[index], status: result.status })), books: { status: books.status } },
+    })
   } catch (error) {
-    console.error('Error in enhanced analysis:', error);
-    return NextResponse.json(
-      { error: 'Failed to analyze symbol with enhanced data', details: (error as Error).message },
-      { status: 500 }
-    );
+    console.error('Symbol recognition failed:', error instanceof Error ? error.message : 'Unknown error')
+    return NextResponse.json({ error: 'Symbol recognition could not be completed', ...(process.env.NODE_ENV === 'development' && error instanceof z.ZodError ? { diagnostics: { stage, fields: error.issues.map(issue => ({ path: issue.path.join('.'), code: issue.code })) } } : {}), details: error instanceof z.ZodError ? 'The model returned an incomplete identification. Please retry.' : error instanceof SyntaxError ? 'The model returned invalid JSON. Please retry.' : (error as Error).message }, { status: 502 })
   }
-} 
+}

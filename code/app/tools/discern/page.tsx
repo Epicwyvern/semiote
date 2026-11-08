@@ -2,28 +2,24 @@
 
 import type React from "react"
 import { useEffect, useRef, useState } from "react"
-import { ArrowUpFromLine, ChevronLeft, ChevronRight, ExternalLink, FileSymlink, Info, LoaderCircle, Scan, X } from "lucide-react"
+import { ArrowUpFromLine, ChevronLeft, ChevronRight, ExternalLink, FileSymlink, LoaderCircle } from "lucide-react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 
-type SymbolRegion = {
-  id: string
-  name: string
-  category: string
-  confidence: number
-  boundingBox: { x: number; y: number; width: number; height: number }
-  maskWidth: number
-  maskHeight: number
-  maskSpans: [number, number, number][]
-}
-type RegionBox = { x: number; y: number; width: number; height: number }
+import { DiscernImage } from "@/components/discern-image"
+import { DiscernSources, type ResearchStatus } from "@/components/discern-sources"
+import type { SymbolRegion, RegionBox } from "@/lib/discern-image"
+import { createRegionAnalysisManager, regionLabel, type RegionAnalysisState } from "@/lib/region-analysis"
+import { recognitionCrop } from "@/lib/recognition-images"
+import type { ResearchSource } from "@/lib/symbol-research"
+import type { VerifiedComparison, VisualIdentification, ReferenceVerification, HistoricalAttribution } from "@/lib/symbol-recognition"
 
 type SymbolAnalysis = {
   name: string
   category: string
-  confidence: number
-  prominence: number
-  authenticity: number
+  confidence: number | null
+  prominence: number | null
+  authenticity: number | null
   description: string
   overallScoreRationale: string
   contextDescription: string
@@ -38,14 +34,21 @@ type SymbolAnalysis = {
   dominantSubject: string
   embeddedSymbols: string[]
   classificationReasoning: string
+  identification?: { status: string; descriptiveName: string; explanation: string; comparisons: VerifiedComparison[]; verificationAvailable?: boolean; historicalSourceIds: string[] }
+  visualIdentification?: VisualIdentification
+  referenceVerification?: ReferenceVerification
+  historicalAttribution?: HistoricalAttribution
+  sources: ResearchSource[]
+  furtherReading: ResearchSource[]
+  researchStatus?: ResearchStatus
 }
 
 const emptyAnalysis: SymbolAnalysis = {
   name: "",
   category: "Symbol",
-  confidence: 0,
-  prominence: 0,
-  authenticity: 0,
+  confidence: null,
+  prominence: null,
+  authenticity: null,
   description: "",
   overallScoreRationale: "",
   contextDescription: "",
@@ -59,14 +62,15 @@ const emptyAnalysis: SymbolAnalysis = {
   imageType: "ambiguous",
   dominantSubject: "Unknown subject",
   embeddedSymbols: [],
-  classificationReasoning: ""
+  classificationReasoning: "",
+  sources: [],
+  furtherReading: []
 }
 
 const asText = (value: unknown, fallback = "Unknown") => typeof value === "string" && value.trim() ? value : fallback
 const asScore = (value: unknown) => {
-  if (typeof value !== "number" || !Number.isFinite(value)) return 0
-  const score = value > 0 && value <= 1 ? value * 10 : value
-  return Math.max(0, Math.min(10, score))
+  if (typeof value !== "number" || !Number.isFinite(value)) return null
+  return Math.max(0, Math.min(10, value))
 }
 
 function normalizeAnalysis(data: Record<string, unknown>): SymbolAnalysis {
@@ -97,140 +101,68 @@ function normalizeAnalysis(data: Record<string, unknown>): SymbolAnalysis {
     imageType: asText(data.imageType, "ambiguous"),
     dominantSubject: asText(data.dominantSubject),
     embeddedSymbols,
-    classificationReasoning: asText(data.classificationReasoning, "")
+    classificationReasoning: asText(data.classificationReasoning, ""),
+    identification: data.identification && typeof data.identification === 'object' ? data.identification as SymbolAnalysis['identification'] : undefined,
+    visualIdentification: data.visualIdentification && typeof data.visualIdentification === 'object' ? data.visualIdentification as VisualIdentification : undefined,
+    referenceVerification: data.referenceVerification && typeof data.referenceVerification === 'object' ? data.referenceVerification as ReferenceVerification : undefined,
+    historicalAttribution: data.historicalAttribution && typeof data.historicalAttribution === 'object' ? data.historicalAttribution as HistoricalAttribution : undefined,
+    sources: Array.isArray(data.sources) ? data.sources as ResearchSource[] : [],
+    furtherReading: Array.isArray(data.furtherReading) ? data.furtherReading as ResearchSource[] : [],
+    researchStatus: data.researchStatus && typeof data.researchStatus === 'object' ? data.researchStatus as ResearchStatus : undefined
   }
 }
 
 export default function DiscernPage() {
   const [images, setImages] = useState<string[]>([])
   const [imageIndex, setImageIndex] = useState(0)
-  const [imageSize, setImageSize] = useState({ width: 0, height: 0 })
-  const [imageViewport, setImageViewport] = useState({ width: 0, height: 0 })
   const [regions, setRegions] = useState<SymbolRegion[]>([])
   const [imageClassification, setImageClassification] = useState<{ kind: string; summary: string; source: 'openai' | 'generic' } | null>(null)
-  const [isDrawingRegion, setIsDrawingRegion] = useState(false)
-  const [manualRegion, setManualRegion] = useState<RegionBox | null>(null)
-  const [draftRegion, setDraftRegion] = useState<RegionBox | null>(null)
-  const [drawStart, setDrawStart] = useState<{ x: number; y: number } | null>(null)
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null)
   const [analyses, setAnalyses] = useState<Record<string, SymbolAnalysis>>({})
   const [isDragging, setIsDragging] = useState(false)
   const [isSegmenting, setIsSegmenting] = useState(false)
-  const [busyRegionId, setBusyRegionId] = useState<string | null>(null)
+  const [analysisStates, setAnalysisStates] = useState<Record<string, RegionAnalysisState>>({})
   const [error, setError] = useState<string | null>(null)
-  const imageStageRef = useRef<HTMLDivElement>(null)
-  const maskCanvasRef = useRef<HTMLCanvasElement>(null)
 
   const selectedRegion = regions.find((region) => region.id === selectedRegionId) || null
   const selectedAnalysis = selectedRegionId ? analyses[selectedRegionId] : null
-  const imageScale = imageSize.width && imageSize.height && imageViewport.width && imageViewport.height
-    ? Math.min(imageViewport.width / imageSize.width, imageViewport.height / imageSize.height)
-    : 0
-  const renderedImageWidth = imageSize.width * imageScale
-  const renderedImageHeight = imageSize.height * imageScale
-  const imageOffsetX = (imageViewport.width - renderedImageWidth) / 2
-  const imageOffsetY = (imageViewport.height - renderedImageHeight) / 2
-
-  const getImagePoint = (event: React.PointerEvent<HTMLDivElement>) => {
-    const stage = imageStageRef.current
-    if (!stage || imageScale <= 0) return null
-    const bounds = stage.getBoundingClientRect()
-    const x = ((event.clientX - bounds.left - imageOffsetX) / renderedImageWidth) * 1000
-    const y = ((event.clientY - bounds.top - imageOffsetY) / renderedImageHeight) * 1000
-    if (x < 0 || x > 1000 || y < 0 || y > 1000) return null
-    return { x, y }
-  }
-
-  const boxFromPoints = (start: { x: number; y: number }, end: { x: number; y: number }): RegionBox => ({
-    x: Math.min(start.x, end.x),
-    y: Math.min(start.y, end.y),
-    width: Math.abs(end.x - start.x),
-    height: Math.abs(end.y - start.y),
+  const getRegionLabel = (region: SymbolRegion) => regionLabel(analyses[region.id])
+  const isAnyAnalysisRunning = Object.values(analysisStates).some(state => state.status === 'analyzing' || state.status === 'queued')
+  const imageSession = useRef(0)
+  const segmentationController = useRef<AbortController | null>(null)
+  const analysisManager = useRef<ReturnType<typeof createRegionAnalysisManager<SymbolAnalysis>> | null>(null)
+  if (!analysisManager.current) analysisManager.current = createRegionAnalysisManager<SymbolAnalysis>({
+    onState: (id, state) => setAnalysisStates(previous => ({ ...previous, [id]: state })),
+    onResult: (id, result) => setAnalyses(previous => ({ ...previous, [id]: result })),
   })
+  useEffect(() => () => { analysisManager.current?.reset(); segmentationController.current?.abort() }, [])
 
-  const getRegionLabel = (region: SymbolRegion) => analyses[region.id]?.name || region.name
+  const manualImages = useRef<Record<string, string>>({})
 
-  useEffect(() => {
-    const stage = imageStageRef.current
-    if (!stage) return
-
-    const observer = new ResizeObserver(([entry]) => {
-      setImageViewport({ width: entry.contentRect.width, height: entry.contentRect.height })
+  const analyzeRegion = (imageDataUrl: string, region: SymbolRegion, priority = false) => analysisManager.current!.run(region.id, async signal => {
+    const targetImageDataUrl = manualImages.current[region.id] || await recognitionCrop(imageDataUrl, region.boundingBox)
+    const response = await fetch('/api/enhancedAnalysis', {
+      method: 'POST', signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ imageDataUrl: targetImageDataUrl, targetImageDataUrl, contextImageDataUrl: imageDataUrl,
+        selectionKind: region.manual ? 'painted' : 'region', boundingBox: { ...region.boundingBox, coordinateScale: 1000 } }),
     })
-    observer.observe(stage)
-    return () => observer.disconnect()
-  }, [images.length, imageIndex])
-
-  useEffect(() => {
-    const canvas = maskCanvasRef.current
-    const firstRegion = regions[0]
-    if (!canvas || !firstRegion) return
-
-    canvas.width = firstRegion.maskWidth
-    canvas.height = firstRegion.maskHeight
-    const context = canvas.getContext('2d')
-    if (!context) return
-
-    const imageData = context.createImageData(canvas.width, canvas.height)
-    const palette = ['#087e8b', '#a53f58', '#276749', '#6b4c9a', '#c17b2a', '#2773a5']
-    const paintRegion = (region: SymbolRegion, regionIndex: number, selected: boolean) => {
-      const color = selected ? '#e2a817' : palette[regionIndex % palette.length]
-      const red = Number.parseInt(color.slice(1, 3), 16)
-      const green = Number.parseInt(color.slice(3, 5), 16)
-      const blue = Number.parseInt(color.slice(5, 7), 16)
-      const alpha = selected ? 115 : 65
-
-      for (const [y, start, end] of region.maskSpans) {
-        for (let x = start; x < end; x++) {
-          const offset = (y * canvas.width + x) * 4
-          imageData.data[offset] = red
-          imageData.data[offset + 1] = green
-          imageData.data[offset + 2] = blue
-          imageData.data[offset + 3] = alpha
-        }
-      }
-    }
-
-    regions.forEach((region, index) => {
-      if (region.id !== selectedRegionId) paintRegion(region, index, false)
-    })
-    const selectedIndex = regions.findIndex((region) => region.id === selectedRegionId)
-    if (selectedIndex >= 0) paintRegion(regions[selectedIndex], selectedIndex, true)
-    context.putImageData(imageData, 0, 0)
-  }, [regions, selectedRegionId])
-
-  const analyzeRegion = async (imageDataUrl: string, region: SymbolRegion) => {
-    setBusyRegionId(region.id)
-    setError(null)
-
-    try {
-      const response = await fetch('/api/enhancedAnalysis', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          imageDataUrl,
-          boundingBox: { ...region.boundingBox, coordinateScale: 1000 },
-          symbolName: region.name
-        })
-      })
-      const result = await response.json()
-      if (!response.ok) throw new Error(result.details || result.error || 'Symbol analysis failed')
-      if (!result.analysis || typeof result.analysis !== 'object') throw new Error('The analysis response was incomplete')
-      setAnalyses((previous) => ({ ...previous, [region.id]: normalizeAnalysis(result.analysis) }))
-    } catch (analysisError) {
-      setError((analysisError as Error).message || 'Symbol analysis failed')
-    } finally {
-      setBusyRegionId((current) => current === region.id ? null : current)
-    }
-  }
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.details || result.error || 'Symbol analysis failed')
+    if (!result.analysis || typeof result.analysis !== 'object') throw new Error('The analysis response was incomplete')
+    return normalizeAnalysis({ ...result.analysis, furtherReading: result.furtherReading, researchStatus: result.researchStatus })
+  }, priority)
 
   const runSegmentation = async (imageDataUrl: string, focusedRegion?: RegionBox) => {
+    const session = ++imageSession.current
+    analysisManager.current!.reset()
+    segmentationController.current?.abort()
+    const controller = new AbortController()
+    segmentationController.current = controller
+    setAnalysisStates({})
     setIsSegmenting(true)
-    setIsDrawingRegion(false)
-    setDraftRegion(null)
-    setDrawStart(null)
-    if (!focusedRegion) setManualRegion(null)
     setRegions([])
+    manualImages.current = {}
     setImageClassification(null)
     setSelectedRegionId(null)
     setAnalyses({})
@@ -238,11 +170,12 @@ export default function DiscernPage() {
 
     try {
       const response = await fetch('/api/segment', {
-        method: 'POST',
+        method: 'POST', signal: controller.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ imageDataUrl, manualRegion: focusedRegion })
       })
       const result = await response.json()
+      if (session !== imageSession.current) return false
       if (!response.ok) throw new Error(result.details || result.error || 'Image segmentation failed')
       if (result.imageClassification && typeof result.imageClassification === 'object') {
         setImageClassification(result.imageClassification)
@@ -253,17 +186,17 @@ export default function DiscernPage() {
         setError(focusedRegion
           ? 'No distinct motif could be segmented inside that selection. Try including a little background around the motif.'
           : 'No named symbols were detected. You can select an area to inspect it manually.')
-        return
+        return false
       }
-      // The dashed box is input guidance; only SAM masks remain after detection.
-      if (focusedRegion) setManualRegion(null)
       setSelectedRegionId(found[0].id)
       setIsSegmenting(false)
-      await analyzeRegion(imageDataUrl, found[0])
+      for (const region of found) void analyzeRegion(imageDataUrl, region)
+      return true
     } catch (segmentationError) {
-      setError((segmentationError as Error).message || 'Image segmentation failed')
+      if (session === imageSession.current) setError((segmentationError as Error).message || 'Image segmentation failed')
+      return false
     } finally {
-      setIsSegmenting(false)
+      if (session === imageSession.current) setIsSegmenting(false)
     }
   }
 
@@ -295,9 +228,6 @@ export default function DiscernPage() {
     })))
     setImages(dataUrls)
     setImageIndex(0)
-    setImageSize({ width: 0, height: 0 })
-    setManualRegion(null)
-    setDraftRegion(null)
     void runSegmentation(dataUrls[0])
   }
 
@@ -310,25 +240,24 @@ export default function DiscernPage() {
   const selectRegion = (region: SymbolRegion) => {
     setSelectedRegionId(region.id)
     const imageDataUrl = images[imageIndex]
-    if (imageDataUrl && !analyses[region.id]) void analyzeRegion(imageDataUrl, region)
+    if (imageDataUrl && !analyses[region.id]) void analyzeRegion(imageDataUrl, region, true)
   }
 
   const removeImage = () => {
+    imageSession.current++
+    analysisManager.current!.reset()
+    segmentationController.current?.abort()
+    setAnalysisStates({})
+    setIsSegmenting(false)
     setImages([])
     setImageIndex(0)
     setRegions([])
+    manualImages.current = {}
     setImageClassification(null)
     setSelectedRegionId(null)
     setAnalyses({})
     setError(null)
-    setManualRegion(null)
-    setDraftRegion(null)
-    setIsDrawingRegion(false)
   }
-
-  const score = selectedAnalysis
-    ? ((selectedAnalysis.confidence * 0.4) + (selectedAnalysis.prominence * 0.3) + (selectedAnalysis.authenticity * 0.3)).toFixed(1)
-    : '0.0'
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[#FDFBF6] px-4 py-4 font-lato text-base leading-relaxed text-[#0B0B0B] sm:px-6 sm:py-6">
@@ -340,15 +269,15 @@ export default function DiscernPage() {
           </div>
           <p className="mt-2 max-w-4xl text-base text-[#3A3A3A]">
             {imageClassification
-              ? `${imageClassification.kind}: ${imageClassification.summary}${imageClassification.source === 'generic' ? ' Â· broad detection used' : ''}`
+              ? `${imageClassification.kind}: ${imageClassification.summary}${imageClassification.source === 'generic' ? ' · broad detection used' : ''}`
               : 'Classify the image, then inspect each detected symbol region.'}
           </p>
         </div>
         {images.length > 1 && (
           <div className="flex shrink-0 items-center gap-1 text-base">
-            <button aria-label="Previous image" disabled={imageIndex === 0 || isSegmenting} onClick={() => { const next = imageIndex - 1; setImageIndex(next); void runSegmentation(images[next]) }} className="border border-[#3A3A3A]/20 p-3 disabled:opacity-40"><ChevronLeft size={16} /></button>
+            <button aria-label="Previous image" disabled={imageIndex === 0 || isSegmenting || isAnyAnalysisRunning} onClick={() => { const next = imageIndex - 1; setImageIndex(next); void runSegmentation(images[next]) }} className="border border-[#3A3A3A]/20 p-3 disabled:opacity-40"><ChevronLeft size={16} /></button>
             <span className="px-2 tabular-nums">{imageIndex + 1} / {images.length}</span>
-            <button aria-label="Next image" disabled={imageIndex >= images.length - 1 || isSegmenting} onClick={() => { const next = imageIndex + 1; setImageIndex(next); void runSegmentation(images[next]) }} className="border border-[#3A3A3A]/20 p-3 disabled:opacity-40"><ChevronRight size={16} /></button>
+            <button aria-label="Next image" disabled={imageIndex >= images.length - 1 || isSegmenting || isAnyAnalysisRunning} onClick={() => { const next = imageIndex + 1; setImageIndex(next); void runSegmentation(images[next]) }} className="border border-[#3A3A3A]/20 p-3 disabled:opacity-40"><ChevronRight size={16} /></button>
           </div>
         )}
       </header>
@@ -362,7 +291,7 @@ export default function DiscernPage() {
         >
           <ArrowUpFromLine className="mb-4 h-8 w-8 text-[#816719]" />
           <p className="text-base text-[#2d2a27]">Drop images here, paste from clipboard, or choose files</p>
-          <p className="mt-2 text-base text-[#6a645d]">PNG, JPG, WEBP, or SVG Â· 10 MB maximum per image</p>
+          <p className="mt-2 text-base text-[#6a645d]">PNG, JPG, WEBP, or SVG · 10 MB maximum per image</p>
           <input type="file" accept="image/*" multiple className="hidden" id="image-upload" onChange={handleFileInput} />
           <Button asChild className="mt-5 h-12 rounded-none border border-[#816719] bg-[#D4AF37] px-5 text-base text-[#0B0B0B] hover:bg-[#c29d2e]">
             <label htmlFor="image-upload" className="cursor-pointer">Choose images</label>
@@ -370,180 +299,73 @@ export default function DiscernPage() {
           {error && <p role="alert" className="mt-4 text-base text-[#8b342c]">{error}</p>}
         </div>
       ) : (
-        <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(240px,42%)_minmax(0,1fr)] gap-5 overflow-hidden lg:grid-cols-[minmax(340px,1fr)_minmax(0,1.35fr)] lg:grid-rows-1">
-          <section className="flex min-h-0 flex-col border border-[#3A3A3A]/20 bg-[#FDFBF6] p-3 sm:p-4">
-            <div className="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#3A3A3A]/15 pb-2">
-              <div className="flex min-w-0 items-center gap-2">
-                <span className="text-sm font-bold uppercase tracking-widest text-[#595959]">Image</span>
-                <span className="truncate text-base text-[#3A3A3A]">{regions.length ? `${regions.length} ${regions.length === 1 ? 'region' : 'regions'}` : isSegmenting ? 'Finding regions…' : 'No regions found'}</span>
+        <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(500px,60vh)_minmax(500px,1fr)] gap-5 overflow-y-auto lg:overflow-hidden lg:grid-cols-[minmax(340px,1fr)_minmax(0,1.35fr)] lg:grid-rows-1">
+          <DiscernImage
+            key={images[imageIndex]}
+            src={images[imageIndex]}
+            regions={regions}
+            selectedId={selectedRegionId}
+            busy={isSegmenting}
+            analysisBusy={isAnyAnalysisRunning}
+            label={getRegionLabel}
+            onSelect={selectRegion}
+            onBoxAnalyze={async (box) => {
+              if (!await runSegmentation(images[imageIndex], box)) throw new Error('No mask was found. Adjust the box and try again.')
+            }}
+            onPaintAnalyze={async (region, imageDataUrl) => {
+              const session = imageSession.current
+              const previousRegion = regions.find(item => item.id === region.id)
+              const previousImage = manualImages.current[region.id]
+              const previousAnalysis = analyses[region.id]
+              const previousSelected = selectedRegionId
+              manualImages.current[region.id] = imageDataUrl
+              setRegions(previous => [...previous.filter(item => item.id !== region.id), region])
+              setAnalyses(previous => { const next = { ...previous }; delete next[region.id]; return next })
+              setSelectedRegionId(region.id)
+              if (!await analyzeRegion(images[imageIndex], region)) {
+                if (session !== imageSession.current) return
+                if (previousImage) manualImages.current[region.id] = previousImage
+                else delete manualImages.current[region.id]
+                setRegions(previous => [...previous.filter(item => item.id !== region.id), ...(previousRegion ? [previousRegion] : [])])
+                if (previousAnalysis) setAnalyses(previous => ({ ...previous, [region.id]: previousAnalysis }))
+                setSelectedRegionId(previousSelected)
+                throw new Error('Analysis failed. Your painted selection is kept so you can retry.')
+              }
+            }}
+            onRemove={removeImage}
+          />
+
+          <section className="flex min-h-0 flex-col border border-[#3A3A3A]/20 bg-[#FDFBF6]">
+            <div className="shrink-0 border-b border-[#3A3A3A]/20 p-3 sm:p-4">
+              <div className="mb-3 flex min-h-11 items-center justify-between gap-3">
+                <div className="flex items-center gap-2"><h2 className="font-lato text-sm font-bold uppercase tracking-widest text-[#595959]">Symbols</h2><span className="text-sm text-[#595959]">{regions.length} {regions.length === 1 ? 'region' : 'regions'}</span></div>
+                {selectedRegion && <span className="text-sm text-[#595959]">Selected region {regions.findIndex(region => region.id === selectedRegionId) + 1}</span>}
               </div>
-              <div className="flex shrink-0 items-center gap-1">
-                {manualRegion && !isDrawingRegion && (
-                  <button
-                    onClick={() => void runSegmentation(images[imageIndex], manualRegion)}
-                    disabled={isSegmenting}
-                    className="border border-[#816719] bg-[#D4AF37] min-h-11 px-3 py-2 text-sm font-medium text-[#0B0B0B] disabled:opacity-50"
-                  >
-                    Analyze selection
-                  </button>
-                )}
-                {(manualRegion || isDrawingRegion) && (
-                  <button
-                    onClick={() => { setManualRegion(null); setDraftRegion(null); setDrawStart(null); setIsDrawingRegion(false) }}
-                    className="border border-[#d0c5b1] min-h-11 px-3 py-2 text-sm text-[#3A3A3A] hover:bg-[#F7ECC8]"
-                  >
-                    Cancel
-                  </button>
-                )}
-                {!isDrawingRegion && !manualRegion && (
-                  <button
-                    onClick={() => { setError(null); setIsDrawingRegion(true) }}
-                    className="flex items-center gap-1 border border-[#d0c5b1] min-h-11 px-3 py-2 text-sm text-[#3A3A3A] hover:bg-[#F7ECC8]"
-                  >
-                    <Scan size={18} /> Select area
-                  </button>
-                )}
-                <button onClick={removeImage} aria-label="Remove image" title="Remove image" className="border border-[#d0c5b1] flex min-h-11 min-w-11 items-center justify-center p-2 text-[#3A3A3A] hover:bg-[#F7ECC8]"><X size={18} /></button>
-              </div>
-            </div>
-            <div ref={imageStageRef} className="relative min-h-0 flex-1 overflow-hidden bg-[#F2EFE7]">
-              <img
-                src={images[imageIndex]}
-                alt={`Uploaded image ${imageIndex + 1}`}
-                className="absolute inset-0 h-full w-full object-contain"
-                onLoad={(event) => setImageSize({ width: event.currentTarget.naturalWidth || 1, height: event.currentTarget.naturalHeight || 1 })}
-              />
-              {regions.length > 0 && imageScale > 0 && (
-                <canvas
-                  ref={maskCanvasRef}
-                  aria-hidden="true"
-                  className="pointer-events-none absolute"
-                  style={{
-                    left: imageOffsetX,
-                    top: imageOffsetY,
-                    width: renderedImageWidth,
-                    height: renderedImageHeight,
-                  }}
-                />
-              )}
-                {imageScale > 0 && regions.map((region, index) => {
-                  const isSelected = region.id === selectedRegionId
-                  const box = region.boundingBox
-                  const color = isSelected ? '#c18b13' : ['#087e8b', '#a53f58', '#276749', '#6b4c9a'][index % 4]
+              <div className="flex min-w-0 gap-2 overflow-x-auto border-t border-[#3A3A3A]/15 pt-3 pb-2" role="group" aria-label="Detected symbols">
+                {regions.map((region, index) => {
+                  const active = region.id === selectedRegionId
+                  const state = analysisStates[region.id]?.status
+                  const label = getRegionLabel(region)
+                  const pending = !analyses[region.id]
                   return (
                     <button
                       key={region.id}
-                      type="button"
-                      aria-label={`Select ${region.name}, confidence ${Math.round(region.confidence * 100)} percent`}
                       onClick={() => selectRegion(region)}
-                      className="absolute border text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0B0B0B]"
-                      style={{
-                        left: imageOffsetX + box.x / 1000 * renderedImageWidth,
-                        top: imageOffsetY + box.y / 1000 * renderedImageHeight,
-                        width: box.width / 1000 * renderedImageWidth,
-                        height: box.height / 1000 * renderedImageHeight,
-                        borderColor: color,
-                        borderWidth: isSelected ? 2 : 1,
-                        backgroundColor: 'transparent',
-                        zIndex: isSelected ? 2 : 1
-                      }}
+                      aria-label={`Region ${index + 1}: ${label}${state === 'analyzing' ? ', analyzing' : state === 'error' ? ', analysis failed' : state === 'queued' ? ', queued' : ''}`}
+                      aria-pressed={active}
+                      aria-busy={state === 'analyzing'}
+                      className={`flex min-h-11 shrink-0 items-center gap-2 border px-3 py-2 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#816719] ${active ? 'border-[#816719] bg-[#F7ECC8] text-[#0B0B0B]' : 'border-[#3A3A3A]/15 bg-[#FDFBF6] text-[#3A3A3A] hover:border-[#816719]/50 hover:bg-[#F7ECC8]/30'}`}
                     >
-                      <span className="absolute left-0 top-0 max-w-full truncate bg-[#0B0B0B] px-1.5 py-1 text-xs leading-none text-white" style={{ outline: `1px solid ${color}` }}>
-                        {index + 1}. {getRegionLabel(region)}
+                      <span aria-hidden="true" className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-sm tabular-nums ${active ? 'bg-[#D4AF37] font-bold text-[#0B0B0B]' : 'bg-[#3A3A3A]/5 text-[#595959]'}`}>{index + 1}</span>
+                      <span className="min-w-0 flex-1">
+                        <span className={`block whitespace-nowrap text-sm leading-snug ${active ? 'font-bold' : ''}`}>{pending ? `Region ${index + 1}` : label}</span>
+                        {(pending || state === 'error') && <span className="mt-0.5 flex items-center gap-1.5 text-xs text-[#595959]">{state === 'analyzing' && <LoaderCircle aria-hidden="true" className="h-3 w-3 animate-spin" />}{state === 'analyzing' ? 'Analyzing…' : state === 'error' ? 'Analysis failed' : state === 'queued' ? 'Queued' : 'Ready to analyze'}</span>}
                       </span>
                     </button>
                   )
                 })}
-                {manualRegion && imageScale > 0 && (
-                  <div
-                    aria-label="Selected image area"
-                    className="pointer-events-none absolute border-2 border-dashed border-[#e2a817] bg-[#e2a817]/10"
-                    style={{
-                      left: imageOffsetX + manualRegion.x / 1000 * renderedImageWidth,
-                      top: imageOffsetY + manualRegion.y / 1000 * renderedImageHeight,
-                      width: manualRegion.width / 1000 * renderedImageWidth,
-                      height: manualRegion.height / 1000 * renderedImageHeight,
-                      zIndex: 10,
-                    }}
-                  />
-                )}
-                {isDrawingRegion && imageScale > 0 && (
-                  <div
-                    className="absolute inset-0 z-20 cursor-crosshair touch-none"
-                    onPointerDown={(event) => {
-                      const point = getImagePoint(event)
-                      if (!point) return
-                      event.preventDefault()
-                      event.currentTarget.setPointerCapture(event.pointerId)
-                      setDrawStart(point)
-                      setDraftRegion({ x: point.x, y: point.y, width: 0, height: 0 })
-                    }}
-                    onPointerMove={(event) => {
-                      if (!drawStart) return
-                      const point = getImagePoint(event)
-                      if (point) setDraftRegion(boxFromPoints(drawStart, point))
-                    }}
-                    onPointerUp={(event) => {
-                      if (!drawStart) return
-                      const point = getImagePoint(event)
-                      if (point) {
-                        const box = boxFromPoints(drawStart, point)
-                        if (box.width >= 8 && box.height >= 8) {
-                          setManualRegion(box)
-                          setDraftRegion(box)
-                        } else {
-                          setError('Draw a larger box around the symbol.')
-                        }
-                      }
-                      setDrawStart(null)
-                      setIsDrawingRegion(false)
-                    }}
-                    onPointerCancel={() => { setDrawStart(null); setDraftRegion(null); setIsDrawingRegion(false) }}
-                  >
-                    {draftRegion && (
-                      <div
-                        className="pointer-events-none absolute border-2 border-dashed border-[#e2a817] bg-[#e2a817]/10"
-                        style={{
-                          left: imageOffsetX + draftRegion.x / 1000 * renderedImageWidth,
-                          top: imageOffsetY + draftRegion.y / 1000 * renderedImageHeight,
-                          width: draftRegion.width / 1000 * renderedImageWidth,
-                          height: draftRegion.height / 1000 * renderedImageHeight,
-                        }}
-                      />
-                    )}
-                  </div>
-                )}
-                {isSegmenting && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-[#FDFBF6]/75 text-base font-medium text-[#3b352c]">
-                    <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> Finding symbol regions
-                  </div>
-                )}
-            </div>
-            <p className="mt-3 shrink-0 text-sm text-[#595959]">
-              {selectedRegion ? `Selected: ${getRegionLabel(selectedRegion)} Â· ${Math.round(selectedRegion.confidence * 100)}% visual confidence` : manualRegion ? 'Area selected. Analyze it to identify the symbol inside.' : isDrawingRegion ? 'Drag around the symbol or meaningful detail' : 'Select a highlighted region or mark an area manually'}
-            </p>
-          </section>
-
-          <section className="flex min-h-0 flex-col border border-[#3A3A3A]/20 bg-[#FDFBF6]">
-            <div className="flex min-h-[64px] shrink-0 items-center gap-3 border-b border-[#3A3A3A]/20 bg-[#F7ECC8] px-3 py-2">
-              <span className="shrink-0 text-sm font-bold uppercase tracking-widest text-[#595959]">Symbols</span>
-              <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto">
-                {regions.map((region, index) => {
-                  const active = region.id === selectedRegionId
-                  return (
-                    <button
-                      key={region.id}
-                      onClick={() => selectRegion(region)}
-                      aria-pressed={active}
-                      className={`shrink-0 border min-h-11 px-4 py-2 text-base transition-colors ${active ? 'border-[#816719] bg-[#D4AF37] font-bold text-[#0B0B0B]' : 'border-[#d2c7b4] bg-[#FDFBF6] text-[#3A3A3A] hover:bg-[#F7ECC8]'}`}
-                    >
-                      {index + 1}. {getRegionLabel(region)}
-                    </button>
-                  )
-                })}
-                {!regions.length && !isSegmenting && <span className="px-2 py-1 text-base text-[#595959]">No regions found</span>}
+                {!regions.length && !isSegmenting && <span className="py-1 text-sm text-[#595959]">No regions found</span>}
               </div>
-              {selectedRegion && <span className="hidden shrink-0 text-sm tabular-nums text-[#595959] sm:block">{Math.round(selectedRegion.confidence * 100)}%</span>}
             </div>
 
             {isSegmenting ? (
@@ -556,71 +378,95 @@ export default function DiscernPage() {
               </div>
             ) : (
               <div key={selectedRegion.id} className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-6">
-                {busyRegionId === selectedRegion.id && !selectedAnalysis ? (
+                {['queued', 'analyzing'].includes(analysisStates[selectedRegion.id]?.status) && !selectedAnalysis ? (
                   <div className="flex h-full min-h-40 items-center justify-center text-base text-[#3A3A3A]">
-                    <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> Analyzing {selectedRegion.name}...
+                    <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> {analysisStates[selectedRegion.id]?.status === 'queued' ? 'Queued — this region will be analyzed next.' : 'Analyzing selected region...'}
+                  </div>
+                ) : analysisStates[selectedRegion.id]?.status === 'error' ? (
+                  <div role="alert" className="space-y-4 p-5 text-center">
+                    <p>{analysisStates[selectedRegion.id].error}</p>
+                    <Button variant="outline" onClick={() => void analyzeRegion(images[imageIndex], selectedRegion)}>Retry this region</Button>
                   </div>
                 ) : selectedAnalysis ? (
                   <div className="space-y-6">
-                    <section className="border border-[#3A3A3A]/20 bg-[#FDFBF6] p-5 sm:p-6">
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div>
-                          <p className="text-sm font-bold uppercase tracking-widest text-[#595959]">Image classification</p>
-                          <h2 className="mt-1 font-garamond text-2xl font-bold capitalize">{selectedAnalysis.imageType.replace(/_/g, ' ')}</h2>
-                        </div>
-                        <span className="border border-[#d4c6a8] bg-[#F7ECC8] px-2 py-1 text-base text-[#3A3A3A]">{selectedAnalysis.dominantSubject}</span>
-                      </div>
-                      <div className="mt-3 grid gap-5 2xl:grid-cols-2">
-                        <div className="py-2">
-                          <p className="text-xs font-bold uppercase tracking-widest text-[#595959]">Selected symbol</p>
-                          <p className="mt-1 text-base font-medium">{selectedAnalysis.name || selectedRegion.name}</p>
-                        </div>
-                        <div className="py-2">
-                          <p className="text-xs font-bold uppercase tracking-widest text-[#595959]">Other motifs</p>
-                          <p className="mt-1 text-base">{selectedAnalysis.embeddedSymbols.length ? selectedAnalysis.embeddedSymbols.join(', ') : 'None identified'}</p>
-                        </div>
-                      </div>
-                      <p className="mt-2 py-2 text-base leading-relaxed text-[#3A3A3A]">{selectedAnalysis.classificationReasoning}</p>
-                    </section>
-
                     <div className="grid gap-5 2xl:grid-cols-2">
                       <section className="border border-[#3A3A3A]/20 bg-[#FDFBF6] p-5 sm:p-6">
                         <div className="mb-3 flex items-start justify-between gap-2">
                           <div className="min-w-0">
-                            <h3 className="break-words font-garamond text-2xl font-bold">{selectedAnalysis.name || selectedRegion.name}</h3>
+                            <h3 className="break-words font-garamond text-2xl font-bold">{getRegionLabel(selectedRegion)}</h3>
                             <p className="text-base text-[#595959]">{selectedAnalysis.category || selectedRegion.category}</p>
                           </div>
-                          <Link href={`/library/symbol/${(selectedAnalysis.name || selectedRegion.name).toLowerCase().replace(/\s+/g, '-')}`}>
+                          {(selectedAnalysis.visualIdentification?.status || selectedAnalysis.identification?.status) !== 'unidentified' && <Link href={`/library/symbol/${(selectedAnalysis.name || selectedRegion.name).toLowerCase().replace(/\s+/g, '-')}`}>
                             <Button variant="outline" size="sm" className="h-11 shrink-0 rounded-none border-[#3A3A3A]/20 px-2 text-sm">
                               Library <ExternalLink size={16} className="ml-1" />
                             </Button>
-                          </Link>
+                          </Link>}
                         </div>
-                        <div className="space-y-5">
-                          {[
-                            ['Confidence', selectedAnalysis.confidence],
-                            ['Prominence', selectedAnalysis.prominence],
-                            ['Authenticity', selectedAnalysis.authenticity]
-                          ].map(([label, value]) => (
-                            <div key={label as string}>
-                              <div className="mb-1 flex justify-between text-base"><span>{label}</span><span>{Number(value).toFixed(1)} / 10</span></div>
-                              <div className="h-2 border border-[#3A3A3A]/15 bg-[#F7ECC8]"><div className="h-full bg-[#D4AF37]" style={{ width: `${Number(value) * 10}%` }} /></div>
-                            </div>
-                          ))}
-                        </div>
+                        <p className="text-sm font-bold uppercase tracking-widest text-[#595959]">Visual identification</p>
+                        <p className="mt-2 inline-block border border-[#816719]/30 bg-[#F7ECC8] px-3 py-1 font-bold capitalize">{selectedAnalysis.visualIdentification?.status || selectedAnalysis.identification?.status || 'Not assessed'}</p>
+                        <p className="mt-4 text-base leading-relaxed">{selectedAnalysis.visualIdentification?.explanation || selectedAnalysis.identification?.explanation || selectedAnalysis.classificationReasoning}</p>
+                        {selectedAnalysis.visualIdentification?.evidence.length ? <ul className="mt-4 list-disc space-y-2 pl-5 text-base">{selectedAnalysis.visualIdentification.evidence.map((item, index) => <li key={index}>{item}</li>)}</ul> : null}
+                        <details className="mt-4 border-t border-[#3A3A3A]/15 pt-2 text-sm text-[#595959]">
+                          <summary className="min-h-11 cursor-pointer py-3">How to read this assessment</summary>
+                          <p className="pb-3 leading-relaxed">The name is an image-based proposal. Reference support is assessed separately. Model assessments are not measured probabilities, and mask confidence describes the selected outline. Appearance alone cannot establish authenticity.</p>
+                        </details>
                       </section>
 
-                      <section className="border border-[#3A3A3A]/20 bg-[#FDFBF6] p-5 sm:p-6">
-                        <h3 className="mb-2 font-garamond text-2xl font-bold">Overall score</h3>
-                        <div className="flex items-start gap-2 py-2">
-                          <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#816719]" />
-                          <div><p className="font-garamond text-5xl font-bold">{score}<span className="ml-2 font-lato text-base font-normal text-[#595959]">/ 10</span></p><p className="mt-1 text-base leading-relaxed text-[#3A3A3A]">{selectedAnalysis.overallScoreRationale || 'Weighted from confidence, prominence, and authenticity.'}</p></div>
-                        </div>
-                        <p className="mt-2 text-base leading-relaxed text-[#3A3A3A]">This score summarizes how strongly the visual evidence and historical context support the identification.</p>
+                      <section className="border border-[#3A3A3A]/20 bg-[#FDFBF6] p-5 sm:p-6" aria-label="Reference verification">
+                        <h3 className="mb-2 font-garamond text-2xl font-bold">Reference verification</h3>
+                        <p className="mb-3 inline-block border border-[#816719]/30 bg-[#F7ECC8] px-3 py-1 font-bold capitalize">{selectedAnalysis.referenceVerification?.status.replace(/_/g, ' ') || 'Not saved'}</p>
+                        <p>{selectedAnalysis.referenceVerification?.explanation || 'Reference verification was not saved with this result. Analyze the image again to check its sources.'}</p>
+                        {(selectedAnalysis.referenceVerification?.issues.length || selectedAnalysis.referenceVerification?.diagnostics?.length) ? <details className="mt-3">
+                          <summary className="min-h-11 cursor-pointer py-3 text-sm">Verification details</summary>
+                          <ul className="list-disc space-y-2 pl-5 text-sm text-[#595959]">
+                            {selectedAnalysis.referenceVerification?.diagnostics?.map((item, index) => <li key={`diagnostic-${index}`}><strong className="capitalize">{item.stage}</strong>: {item.message} <span className="font-mono text-xs">({item.code})</span>{item.fields?.length ? <p className="mt-1 break-words font-mono text-xs">{item.fields.join('; ')}</p> : null}</li>)}
+                            {selectedAnalysis.referenceVerification?.issues.map((issue, index) => <li key={`issue-${index}`}>{issue}</li>)}
+                          </ul>
+                        </details> : null}
                       </section>
 
+                      {selectedAnalysis.identification?.comparisons?.length ? (
+                        <section className="border border-[#3A3A3A]/20 p-5 sm:p-6 2xl:col-span-2">
+                          <h3 className="mb-4 font-garamond text-2xl font-bold">Candidate comparison</h3>
+                          <details className="mb-3 text-sm text-[#595959]"><summary className="min-h-11 cursor-pointer py-3">What do the comparison labels mean?</summary><p className="pb-3">Rejected indicates a verified structural conflict. Less likely ranks a candidate lower without ruling it out. Unresolved means the evidence is incomplete.</p></details>
+                          <div className="space-y-4">
+                            {selectedAnalysis.identification.comparisons.map(candidate => (
+                              <details key={candidate.candidateName} className="border-b border-[#3A3A3A]/15 pb-3">
+                                <summary className="cursor-pointer py-2 font-bold">{candidate.candidateName} <span className="ml-2 text-sm font-normal text-[#595959]">{candidate.verdict.replace(/_/g, ' ')}</span></summary>
+                                <div className="space-y-3 pt-2 text-base">
+                                  <p className="text-sm text-[#595959]">{candidate.verificationSummary}</p>
+                                  <p><strong>Reference definition:</strong> {candidate.referenceDefinition}</p>
+                                  {candidate.requiredFeatures?.length > 0 && <p className="text-sm text-[#595959]">Distinguishing features to resolve: {candidate.requiredFeatures.map(feature => feature.replace(/_/g, ' ')).join(', ')}</p>}
+                                  {candidate.checks?.length > 0 && <div className="space-y-3">
+                                    {candidate.checks.map(check => (
+                                      <details key={check.id} className="border-l-2 border-[#D4AF37]/50 pl-4">
+                                        <summary className="cursor-pointer py-2 text-sm font-bold">{check.feature.replace(/_/g, ' ')} · {check.relation} · {check.verification}</summary>
+                                        <div className="space-y-2 py-2">
+                                          <p><strong>Reference:</strong> {check.reference.description}</p>
+                                          <p><strong>In this image:</strong> {check.target.description}</p>
+                                          <p className="text-sm text-[#595959]">Location: {check.target.location} · Visibility: {check.target.visibility}</p>
+                                          <p className="text-sm">{check.verificationReason}</p>
+                                          {check.reference.sourceIds.length > 0 && <blockquote className="border-l border-[#3A3A3A]/20 pl-3 text-sm text-[#595959]">{check.reference.quote}</blockquote>}
+                                        </div>
+                                      </details>
+                                    ))}
+                                  </div>}
+                                  {candidate.matchedFeatures.length > 0 && <p><strong>Matches:</strong> {candidate.matchedFeatures.join('; ')}</p>}
+                                  {candidate.contradictions.length > 0 && <p><strong>Differences:</strong> {candidate.contradictions.join('; ')}</p>}
+                                  {candidate.uncertainties.length > 0 && <p><strong>Uncertain:</strong> {candidate.uncertainties.join('; ')}</p>}
+                                  <div className="flex flex-wrap gap-3">{candidate.sourceIds.map(id => { const source = selectedAnalysis.sources.find(item => item.id === id); return source ? <a key={id} href={source.url} target="_blank" rel="noopener noreferrer" className="text-sm text-[#816719] underline">{source.title}</a> : null })}</div>
+                                </div>
+                              </details>
+                            ))}
+                          </div>
+                        </section>
+                      ) : null}
                       <section className="border border-[#3A3A3A]/20 bg-[#FDFBF6] p-5 sm:p-6 2xl:col-span-2">
-                        <h3 className="mb-2 font-garamond text-2xl font-bold">Source & origin</h3>
+                        <h3 className="mb-2 font-garamond text-2xl font-bold">Historical attribution</h3>
+                        <p className="mb-3 inline-block border border-[#816719]/30 bg-[#F7ECC8] px-3 py-1 font-bold capitalize">{selectedAnalysis.historicalAttribution?.status.replace(/_/g, ' ') || 'Not established'}</p>
+                        <p className="mb-4 text-sm text-[#595959]">General history of the proposed symbol, where supported by sources. This does not establish the image's provenance or intended meaning.</p>
+                        {selectedAnalysis.historicalAttribution?.status === 'source_supported' ? <>
+                        <div className="mb-3 flex flex-wrap gap-3">{selectedAnalysis.identification?.historicalSourceIds.map(id => { const source = selectedAnalysis.sources.find(item => item.id === id); return source ? <a key={id} href={source.url} target="_blank" rel="noopener noreferrer" className="text-[#816719] underline">{source.title}</a> : null })}</div>
                         <div className="grid gap-5 2xl:grid-cols-2">
                           <div className="py-2">
                             <p className="text-xs font-bold uppercase tracking-widest text-[#595959]">Context</p>
@@ -640,28 +486,32 @@ export default function DiscernPage() {
                             ))}
                           </div>
                         </div>
+                        </> : <p className="text-base text-[#595959]">{selectedAnalysis.historicalAttribution?.explanation || 'No source-supported historical attribution is available for this result.'}</p>}
                       </section>
 
-                      <section className="border border-[#3A3A3A]/20 bg-[#FDFBF6] p-5 sm:p-6 2xl:col-span-2">
-                        <h3 className="mb-2 font-garamond text-2xl font-bold">Visual analysis</h3>
+                      <details className="border border-[#3A3A3A]/20 bg-[#FDFBF6] p-5 sm:p-6 2xl:col-span-2">
+                        <summary className="min-h-11 cursor-pointer font-garamond text-2xl font-bold">Image details</summary>
+                        <p className="mt-3 text-sm capitalize text-[#595959]">{selectedAnalysis.imageType.replace(/_/g, ' ')} · {selectedAnalysis.dominantSubject}</p>
                         <div className="grid gap-5">
                           <p className="py-2 text-base leading-relaxed text-[#3A3A3A]">{selectedAnalysis.description}</p>
-                          <div className="space-y-3 border-l-2 border-[#D4AF37]/50 pl-4 py-2">
-                            {selectedAnalysis.thinkingProcess.length ? selectedAnalysis.thinkingProcess.map((thought, index) => (
-                              <p key={index} className="text-base leading-relaxed text-[#3A3A3A]">{index + 1}. {thought}</p>
-                            )) : <p className="text-base text-[#3A3A3A]">No analysis notes supplied.</p>}
-                          </div>
                         </div>
                         <div className="mt-2 grid gap-5 2xl:grid-cols-2">
                           <div className="py-2"><p className="text-xs font-bold uppercase tracking-wider text-[#595959]">Visual complexity</p><p className="mt-1 text-base">{selectedAnalysis.visualComplexity}</p></div>
                           <div className="py-2"><p className="text-xs font-bold uppercase tracking-wider text-[#595959]">Key elements</p><p className="mt-1 text-base">{selectedAnalysis.keyElements}</p></div>
                         </div>
-                      </section>
+                      </details>
+                      <DiscernSources
+                        sources={selectedAnalysis.sources}
+                        furtherReading={selectedAnalysis.furtherReading}
+                        comparedIds={selectedAnalysis.identification?.comparisons.flatMap(candidate => candidate.sourceIds) || []}
+                        historicalIds={selectedAnalysis.identification?.historicalSourceIds || []}
+                        status={selectedAnalysis.researchStatus}
+                      />
                     </div>
                   </div>
                 ) : (
                   <div className="flex h-full min-h-40 items-center justify-center text-base text-[#3A3A3A]">
-                    <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> Analyzing {selectedRegion.name}...
+                    <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> {analysisStates[selectedRegion.id]?.status === 'queued' ? 'Queued — this region will be analyzed next.' : 'Analyzing selected region...'}
                   </div>
                 )}
               </div>

@@ -5,17 +5,6 @@ const MODEL = 'vufinder/sam3:1bf97763d5dfd3a1584adca913a8ef4b43c684fca97e04e39e4
 const MIN_CONFIDENCE = 0.25;
 const MIN_MASK_PIXELS = 16;
 
-const fallbackSymbolConcepts = [
-  { name: 'Ankh', prompt: 'the named Egyptian ankh symbol, looped cross representing life' },
-  { name: 'Eye of Horus', prompt: 'the named Egyptian Eye of Horus or wedjat symbol' },
-  { name: 'Scarab', prompt: 'the scarab beetle as a distinct Egyptian symbol, not an ordinary beetle' },
-  { name: 'Djed symbol', prompt: 'the named Egyptian djed stability symbol, not a plain architectural pillar' },
-  { name: 'Infinity symbol', prompt: 'a distinct infinity or lemniscate symbol, the connected horizontal figure-eight sign' },
-  { name: 'Star symbol', prompt: 'a distinct star symbol or starburst with identifiable pointed rays' },
-  { name: 'Cross symbol', prompt: 'a distinct cross symbol, not incidental intersecting lines' },
-  { name: 'Triquetra', prompt: 'the distinct interlaced three-lobed triquetra knot symbol' },
-] as const;
-
 type ImageClassification = {
   kind: string;
   summary: string;
@@ -28,7 +17,7 @@ type NormalizedBox = { x: number; y: number; width: number; height: number };
 
 const genericImageClassification: ImageClassification = {
   kind: 'uncertain image type',
-  summary: 'Using a fallback list of named symbols only.',
+  summary: 'Inspecting visual motifs without a predefined symbol list.',
   candidateSymbols: [],
   source: 'generic',
 };
@@ -78,7 +67,7 @@ async function classifyImage(imageDataUrl: string, focusedSelection = false): Pr
               type: 'input_text',
               text: focusedSelection
                 ? `Inspect this user-selected image crop for distinct visual symbols, emblems, glyphs, or stylized motifs. A motif does not need a conventional cultural name: use a short literal visual label such as "Elongated four-pointed star" and describe its visible shape. Do not omit a clearly visible fictional or unfamiliar emblem merely because its name or origin is unknown. Do not invent historical or cultural identities. Exclude ordinary objects, background scenery, selection boundaries, and the crop rectangle itself. If no distinct motif is visible, return an empty symbols array. Return JSON only: {"kind":"short image kind","summary":"short visual description","symbols":[{"name":"literal visual label","visualDescription":"specific shape, color, and distinguishing details"}]}.`
-                : `Classify the overall image to guide symbol segmentation. Choose a short image kind such as: isolated emblem, abstract symbol composition, symbol-bearing object or artifact, photograph/scene with symbols, inscription field, or uncertain. Then list up to six distinct symbols that are actually visible and can be named specifically. Return each as {"name":"recognized symbol name","visualDescription":"brief distinguishing visual cues"}. Include common, named symbols and recognizable glyphs. Never list architecture or ordinary objects as symbols: explicitly exclude columns, pillars, walls, arches, lintels, doorways, buildings, temple interiors, generic carvings, and decorative regions unless a specific conventional symbol is depicted on them. A photograph of a temple is not itself a symbol. Do not invent cultural names for uncertain shapes; omit uncertain candidates. If no identifiable symbol is present, return an empty symbols array. Return JSON only: {"kind":"...","summary":"short scene description","symbols":[{"name":"Ankh","visualDescription":"loop-topped cross glyph"}]}.`,
+                : `Classify the overall image to guide symbol segmentation. Choose a short image kind such as: isolated emblem, abstract symbol composition, symbol-bearing object or artifact, photograph/scene with symbols, inscription field, or uncertain. Then list up to six distinct symbols that are actually visible and can be named specifically. Return each as {"name":"recognized symbol name","visualDescription":"brief distinguishing visual cues"}. Include common, named symbols and recognizable glyphs. Never list architecture or ordinary objects as symbols: explicitly exclude columns, pillars, walls, arches, lintels, doorways, buildings, temple interiors, generic carvings, and decorative regions unless a specific conventional symbol is depicted on them. A photograph of a temple is not itself a symbol. Do not invent cultural names for uncertain shapes; omit uncertain candidates. If no identifiable symbol is present, return an empty symbols array. Return JSON only: {"kind":"...","summary":"short scene description","symbols":[{"name":"specific candidate name","visualDescription":"distinguishing visible structure"}]}.`,
             },
             { type: 'input_image', image_url: imageDataUrl, detail: 'low' },
           ],
@@ -116,7 +105,7 @@ async function classifyImage(imageDataUrl: string, focusedSelection = false): Pr
       source: 'openai',
     };
   } catch (error) {
-    console.warn('Image pre-classification unavailable; using generic SAM-3 concepts:', (error as Error).message);
+    console.warn('Image pre-classification unavailable; using a general visual-motif prompt:', (error as Error).message);
     return genericImageClassification;
   }
 }
@@ -136,13 +125,7 @@ function buildConcepts(classification: ImageClassification, focusedSelection = f
   }
   if (classification.source === 'openai') return candidateConcepts;
 
-  const seen = new Set<string>();
-  return [...fallbackSymbolConcepts].filter((concept) => {
-    const key = concept.name.toLowerCase();
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  }).slice(0, 10);
+  return [{ name: 'Visual motif', prompt: 'a distinct foreground symbol, emblem or glyph; segment its visible design, excluding ordinary objects, architecture, background scenery and the image rectangle' }];
 }
 
 function maskMatrix(mask: unknown): unknown[][] | null {
@@ -232,9 +215,7 @@ function deduplicateRegions(regions: SymbolRegion[]) {
   return ranked.filter((region, index) => !ranked.slice(0, index).some((accepted) => {
     const overlap = intersectionOverUnion(region, accepted);
     const samePromptFamily = region.name === accepted.name;
-    const starCrossDuplicate = [region.name, accepted.name].includes('Four-pointed star')
-      && [region.name, accepted.name].includes('Cross motif');
-    return (samePromptFamily && overlap > 0.55) || (starCrossDuplicate && overlap > 0.75);
+    return (samePromptFamily && overlap > 0.55) || overlap > 0.85;
   }));
 }
 
@@ -334,9 +315,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: true, coordinateScale: 1000, imageClassification, symbols: [] });
     }
     const detected = await runSegmentation(imageDataUrl, concepts, manualRegion);
-    const symbols = (focusedSelection || manualRegion)
-      ? detected.map((region) => ({ ...region, category: 'Visual motif' }))
-      : detected;
+    // SAM finds instances of a prompt; its prompt name is not an identity for
+    // each instance. Only region-specific recognition can assign a name.
+    const symbols = detected.map((region) => ({ ...region, name: 'Unidentified symbol', category: 'Detected region' }));
     return NextResponse.json({ success: true, coordinateScale: 1000, imageClassification, symbols });
   } catch (error) {
     console.error('Error in SAM-3 segmentation:', error);
