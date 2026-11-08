@@ -3,7 +3,8 @@ import { z } from 'zod'
 import { lookupWikipedia, lookupBooks, uniqueSources, referenceImage, citationPassages, normalizedName } from '@/lib/symbol-research'
 import { observationsSchema, identificationSchema, observationInstructions, comparisonInstructions, verificationSchema, verificationInstructions, candidateNames, assembleAnalysis, type Verification, type Identification, type VerificationDiagnostic } from '@/lib/symbol-recognition'
 
-export const maxDuration = 300
+// Keep this within the deployed Vercel Hobby project's 60-second limit.
+export const maxDuration = 60
 const image = z.string().max(20_000_000).regex(/^data:image\/(?:png|jpeg|webp|gif);base64,/)
 const requestSchema = z.object({
   imageDataUrl: image.optional(), imageBase64: z.string().max(18_000_000).optional(),

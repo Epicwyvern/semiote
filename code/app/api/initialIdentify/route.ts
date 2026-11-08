@@ -1,11 +1,6 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
-// Initialize OpenAI client
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
 // Define proper types for multimodal messages
 type TextContent = {
   type: 'text';
@@ -50,6 +45,13 @@ export async function POST(request: Request) {
       prompt = `What is the symbol in this region: ${JSON.stringify(boundingBox)}? Provide only the name and category, nothing else.`;
     }
     
+    // Create the client only for requests, not during build-time module loading.
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json({ error: 'Symbol recognition is not configured' }, { status: 503 });
+    }
+    const openai = new OpenAI({ apiKey });
+
     // Make API call to GPT-4 Vision
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
