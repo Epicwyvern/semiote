@@ -1,5 +1,7 @@
 # Discern recognition evaluation
 
+> Historical evaluation notes: the runs and pipeline descriptions below predate the November 9 changes. Current defaults use GPT-6 Luna; tentative matches can receive web-sourced symbol information. See the root README and the 0.1.1 results archive for current behavior and remaining work.
+
 The current recognition route keeps three independent outcomes:
 
 - Visual identification: the image-only pass proposes an identity, status

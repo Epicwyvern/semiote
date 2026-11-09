@@ -2,6 +2,7 @@ export type RegionBox = { x: number; y: number; width: number; height: number }
 export type SymbolRegion = {
   id: string
   name: string
+  customName?: string
   category: string
   confidence: number
   boundingBox: RegionBox
@@ -9,9 +10,10 @@ export type SymbolRegion = {
   maskHeight: number
   maskSpans: [number, number, number][]
   manual?: boolean
+  boxed?: boolean
 }
 export type View = { zoom: number; x: number; y: number }
-export type Selection = { box: RegionBox | null; pixels: Uint8Array | null; regionId?: string }
+export type Selection = { box: RegionBox | null; pixels: Uint8Array | null; regionId?: string; customName?: string }
 export const emptySelection = (): Selection => ({ box: null, pixels: null })
 export const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value))
 

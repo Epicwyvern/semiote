@@ -37,7 +37,7 @@ const makeCheck = (id, feature, relation, referenceSource = source) => ({ id, fe
 const decision = { selectedCandidateName: 'Four-pointed star', descriptiveName: 'Elongated four-pointed star', category: 'Geometric motif', status: 'supported', confidence: 8, prominence: 9,
   explanation: 'Tapered rays match the star rather than cross bars.', comparisons: names.map(name => ({ candidateName: name, requiredFeatures: name === 'Four-pointed star' ? ['ray_count', 'edge_shape'] : ['edge_shape'], referenceDefinition: name === 'Four-pointed star' ? source.excerpt : crossSource.excerpt,
     checks: name === 'Four-pointed star' ? [makeCheck('rays', 'ray_count', 'match'), makeCheck('edges', 'edge_shape', 'match')] : [makeCheck('bars', 'edge_shape', 'conflict', crossSource)], verdict: name === 'Four-pointed star' ? 'strong' : 'rejected' })),
-  historicalContext: { summary: 'General star history', origin: 'Unknown', timePeriod: 'Unknown', primaryUse: 'Decoration', culturalPrevalence: 'Unknown', sourceIds: ['wiki-1'] } };
+};
 const approvedAudit = decision => ({ reviews: decision.comparisons.map(candidate => ({ candidateName: candidate.candidateName, requiredFeaturesSupported: true, checks: candidate.checks.map(check => ({ checkId: check.id, referenceSupported: true, targetSupported: true, relationSupported: true, discriminating: true, reason: 'Source and visible structure agree with the stated comparison.' })) })) });
 const audit = approvedAudit(decision);
 const assemble = (candidateDecision = decision, candidateSources = sources, candidateAudit = audit) => recognition.assembleAnalysis(observations, candidateDecision, names, candidateSources, candidateAudit);
@@ -50,6 +50,17 @@ assert.deepEqual(Array.from(recognition.candidateNames(unseen)), ['Previously un
 assert.equal(assemble().visualIdentification.status, 'likely');
 assert.equal(assemble().referenceVerification.status, 'verified');
 assert.equal(assemble().historicalAttribution.status, 'source_supported');
+const distinctive = structuredClone(decision);
+distinctive.comparisons[0].requiredFeatures = ['edge_shape'];
+distinctive.comparisons[0].checks = distinctive.comparisons[0].checks.filter(check => check.feature === 'edge_shape');
+assert.equal(assemble(distinctive, sources, approvedAudit(distinctive)).referenceVerification.status, 'verified',
+  'One audited distinctive feature can suffice when it covers the reference definition');
+const partial = structuredClone(audit);
+partial.reviews[0].checks[0].targetSupported = false;
+assert.equal(assemble(decision, sources, partial).identification.comparisons[0].verdict, 'possible',
+  'Show an audited match even when another defining feature is unresolved');
+const research = load('lib/symbol-research.ts');
+assert.equal(research.cleanSourceText('<b>Eye</b>&nbsp;&quot;Wedjat&quot; &#x2014; &#39;amulet&#39;'), 'Eye "Wedjat" — \'amulet\'');
 assert.equal(assemble().identification.comparisons[0].checks[0].reference.quote, source.excerpt, 'Displayed quotations must be reconstructed from retrieved passages');
 assert.equal(assemble(decision, []).visualIdentification.status, 'likely');
 assert.equal(assemble(decision, []).name, 'Four-pointed star');
@@ -62,10 +73,10 @@ assert.equal(recognition.assembleAnalysis(observations, decision, names, sources
 const incomplete = structuredClone(decision); incomplete.comparisons.pop();
 assert.equal(assemble(incomplete).referenceVerification.status, 'verified', 'An unevaluated alternative does not erase independently supported evidence');
 assert.match(assemble(incomplete).referenceVerification.explanation, /alternatives remain unresolved/);
-assert.equal(assemble(incomplete).historicalAttribution.status, 'not_established');
+assert.equal(assemble(incomplete).historicalAttribution.status, 'source_supported');
 const invented = { ...decision, selectedCandidateName: 'Invented identity' };
 assert.equal(assemble(invented).name, 'Four-pointed star', 'A later comparison must not rewrite the image-only name');
-assert.equal(assemble(invented).historicalAttribution.status, 'not_established');
+assert.equal(assemble(invented).historicalAttribution.status, 'source_supported');
 const unsupportedQuote = structuredClone(decision); unsupportedQuote.comparisons[0].checks[0].reference.passageIds = ['invented:p999'];
 assert.equal(assemble(unsupportedQuote).referenceVerification.status, 'inconclusive');
 assert.equal(assemble(unsupportedQuote).visualIdentification.status, 'likely');
@@ -132,7 +143,7 @@ const conflictDecision = structuredClone(decision);
 conflictDecision.comparisons[0].checks[0].relation = 'conflict'; conflictDecision.comparisons[0].checks[0].target.value = 3;
 const conflict = assemble(conflictDecision,sources,approvedAudit(conflictDecision));
 assert.equal(conflict.visualIdentification.status,'likely'); assert.equal(conflict.name,'Four-pointed star');
-assert.equal(conflict.referenceVerification.status,'contradicted'); assert.equal(conflict.historicalAttribution.status,'not_established');
+assert.equal(conflict.referenceVerification.status,'contradicted'); assert.equal(conflict.historicalAttribution.status,'source_supported');
 // Structured feature identifiers and prose descriptions are distinct.
 const structuredRequirements = structuredClone(decision);
 structuredRequirements.comparisons[0].requiredFeatures = [{feature:'ray count',description:'Four rays visible'},{feature:'edge-shape',description:'Tapered edges'}];
@@ -196,32 +207,51 @@ assert.equal(assemble(competing, sources, approvedAudit(competing)).referenceVer
   assert.equal((await failed.lookupBooks('cross')).sources.length, 0);
   assert.equal((await failed.lookupWikipedia('cross')).status, 'unavailable');
   assert.equal((await failed.lookupWikipedia('cross')).failureCode, 'http_503');
+  const laterHistory = 'The motif was used for decoration.';
+  const articleText = source.excerpt + ' ' + 'Filler sentence. '.repeat(260) + laterHistory;
   let modelCalls = [];
   const route = load('app/api/enhancedAnalysis/route.ts', {
     process: { env: { OPENAI_API_KEY: 'test' } },
     fetch: async (url, options) => {
       if (url.includes('/responses')) {
         const body = JSON.parse(options.body); modelCalls.push(body);
-        return Response.json({ output: [{ content: [{ type: 'output_text', text: JSON.stringify(modelCalls.length === 1 ? observations : modelCalls.length === 2 ? decision : audit) }] }] });
+        if (body.tools?.some(tool => tool.type === 'web_search')) return Response.json({ output: [] });
+        const instructions = body.input[0].content;
+        const output = instructions.startsWith('Extract historical') ? { primaryUse: 'Decoration' }
+          : instructions.startsWith('Compare proposed') ? decision
+          : instructions.startsWith('Independently audit') ? audit : observations;
+        return Response.json({ output: [{ content: [{ type: 'output_text', text: JSON.stringify(output) }] }] });
       }
-      return Response.json({ query: { pages: [{ pageid: 1, title: 'Four-pointed star', extract: source.excerpt }, { pageid: 'cross', title: 'Cross', extract: crossSource.excerpt }] } });
+      return Response.json({ query: { pages: [{ pageid: 1, title: 'Four-pointed star', extract: articleText }, { pageid: 'cross', title: 'Cross', extract: crossSource.excerpt }] } });
     },
   });
   const response = await route.POST(new Request('http://localhost/api/enhancedAnalysis', { method: 'POST', body: JSON.stringify({ imageDataUrl: 'data:image/png;base64,target', targetImageDataUrl: 'data:image/png;base64,target', contextImageDataUrl: 'data:image/png;base64,original', symbolName: 'DETECTOR_ONLY_LABEL' }) }));
   const result = await response.json();
   assert.equal(response.status, 200);
   assert.equal(result.analysis.name, 'Four-pointed star');
-  assert.equal(modelCalls.length, 3);
-  const verifierPayload = JSON.parse(modelCalls[2].input[1].content.find(item => item.type === 'input_text' && item.text.startsWith('{')).text);
+  assert.equal(modelCalls.length, 5, 'Includes the web-history attempt before article fallback');
+  assert.equal(modelCalls.filter(call => call.tools?.some(tool => tool.type === 'web_search')).length, 1);
+  const historyCall = modelCalls.find(call => String(call.input[0].content).startsWith('Extract historical'));
+  assert.ok(JSON.parse(historyCall.input[1].content[0].text).article.endsWith(laterHistory));
+  assert.equal(result.analysis.primaryUse, 'Decoration');
+  assert.equal(result.analysis.timePeriod, 'Unknown');
+  assert.deepEqual(result.analysis.historicalAttribution.sourceIds, ['wiki-1']);
+  const verifierPayload = JSON.parse(modelCalls.find(call => String(call.input[0].content).startsWith('Independently audit')).input[1].content.find(item => item.type === 'input_text' && item.text.startsWith('{')).text);
   assert.equal('selectedCandidateName' in verifierPayload, false);
   assert.ok(verifierPayload.comparisons.every(item => !('verdict' in item)));
   assert.equal(modelCalls[0].input[1].content.filter(item => item.type === 'input_image').length, 2);
   assert.equal(JSON.stringify(modelCalls).includes('DETECTOR_ONLY_LABEL'), false, 'The detector label must not anchor identification');
-  let degradedCalls = 0;
+
   const degraded = load('app/api/enhancedAnalysis/route.ts', {
     console: { error() {}, warn() {} }, process: { env: { OPENAI_API_KEY: 'test' } },
-    fetch: async url => {
-      if (url.includes('/responses')) { degradedCalls++; return Response.json({ output: [{ content: [{ type: 'output_text', text: JSON.stringify(degradedCalls === 1 ? observations : degradedCalls === 2 ? decision : {}) }] }] }); }
+    fetch: async (url, options) => {
+      if (url.includes('/responses')) {
+        const instructions = JSON.parse(options.body).input[0].content;
+        const output = instructions.startsWith('Inspect the target') ? observations
+          : instructions.startsWith('Compare proposed') ? decision
+          : instructions.startsWith('Extract historical') ? { culturalPrevalence: 'Documented cultural setting' } : {};
+        return Response.json({ output: [{ content: [{ type: 'output_text', text: JSON.stringify(output) }] }] });
+      }
       return Response.json({ query: { pages: [{ pageid: 1, title: 'Four-pointed star', extract: source.excerpt }, { pageid: 'cross', title: 'Cross', extract: crossSource.excerpt }] } });
     },
   });
@@ -233,6 +263,7 @@ assert.equal(assemble(competing, sources, approvedAudit(competing)).referenceVer
   assert.equal(degradedResult.analysis.name, 'Four-pointed star');
   assert.equal(degradedResult.analysis.referenceVerification.status, 'processing_failed');
   assert.equal(degradedResult.analysis.origin, 'Unknown');
+  assert.equal(degradedResult.analysis.culturalPrevalence, 'Documented cultural setting');
   assert.equal(degradedResult.analysis.referenceVerification.diagnostics[0].stage, 'audit');
   assert.equal(degradedResult.analysis.referenceVerification.diagnostics[0].code, 'invalid_schema');
   assert.ok(degradedResult.analysis.referenceVerification.diagnostics[0].fields.includes('reviews: invalid_type'));
@@ -256,6 +287,92 @@ assert.equal(assemble(competing, sources, approvedAudit(competing)).referenceVer
     assert.equal(body.analysis.referenceVerification.diagnostics[0].code,code);
     assert.equal(JSON.stringify(body).includes('PRIVATE_UPSTREAM_DETAILS'),false);
     assert.equal(body.analysis.visualIdentification.status,'likely');
+  }
+  for (const [broad, cited] of [[false, true], [false, false], [true, true], [true, false]]) {
+    const unresolved = broad ? {
+      ...observations,
+      identityScope: 'associated_entity',
+      identityLeads: ['Example game'],
+    } : { ...observations, visualIdentification: {
+      ...observations.visualIdentification, status: 'unidentified', selectedCandidateName: null,
+    } };
+    let searches = 0;
+    const fallback = load('app/api/enhancedAnalysis/route.ts', {
+      process: { env: { OPENAI_API_KEY: 'test' } },
+      fetch: async (url, options) => {
+        if (!url.includes('/responses')) return Response.json({ query: { pages: [] } });
+        const body = JSON.parse(options.body);
+        if (!body.tools) return Response.json({ output: [{ content: [{ type: 'output_text', text: JSON.stringify(unresolved) }] }] });
+        if (body.instructions?.startsWith('Research the depicted')) return Response.json({ output: [] });
+        searches++;
+        assert.ok(body.tools[0].search_content_types.includes('image'));
+        if (broad) {
+          const clues = JSON.parse(body.input[0].content[1].text);
+          assert.deepEqual(clues.relatedNames, ['Example game']);
+          assert.equal(clues.proposedIdentity, observations.visualIdentification.selectedCandidateName);
+        }
+        assert.equal(body.input[0].content[0].image_url, 'data:image/png;base64,target');
+        return Response.json({ status: 'completed', output: [
+          { type: 'web_search_call', status: 'completed' },
+          { type: 'message', content: [{
+            type: 'output_text',
+            text: JSON.stringify({ name: 'Example band', explanation: 'Matching emblem', evidence: ['Same four linked hearts'] }),
+            annotations: cited ? [{ type: 'url_citation', url: 'https://example.com/emblem', title: 'Band emblem' }] : [],
+          }] },
+        ] });
+      },
+    });
+    const response = await fallback.POST(new Request('http://localhost/api/enhancedAnalysis', {
+      method: 'POST', body: JSON.stringify({ imageDataUrl: 'data:image/png;base64,target' }),
+    }));
+    assert.equal(response.status, 200);
+    assert.equal(searches, 1);
+    const result = await response.json();
+    assert.equal(result.observations.visualIdentification.status, broad ? 'likely' : 'unidentified');
+    assert.equal(result.analysis.visualIdentification.status, cited || broad ? 'tentative' : 'unidentified');
+    if (cited) {
+      assert.equal(result.analysis.name, 'Example band');
+      assert.ok(result.analysis.sources.some(source => source.kind === 'web' && source.url === 'https://example.com/emblem'));
+    }
+    assert.equal(result.analysis.visualIdentification.webReference?.url, cited ? 'https://example.com/emblem' : undefined);
+  }
+  for (const [name, cited] of [['Example band', true], ['Example band logo', true], ['Example band', false]]) {
+    const logo = { ...observations, markType: 'logo', candidates: [{ name, distinguishingFeatures: ['Linked hearts'] }],
+      visualIdentification: { ...observations.visualIdentification, selectedCandidateName: name } };
+    let historySearches = 0;
+    const logoRoute = load('app/api/enhancedAnalysis/route.ts', {
+      process: { env: { OPENAI_API_KEY: 'test' } },
+      fetch: async (url, options) => {
+        if (!url.includes('/responses')) return Response.json({ query: { pages: [{ pageid: 1, title: name, extract: 'General biography of the band.' }] } });
+        const body = JSON.parse(options.body);
+        if (!body.tools) {
+          const instructions = body.input[0].content;
+          assert.ok(!instructions.startsWith('Extract historical'), 'A logo must bypass generic article history');
+          const value = instructions.startsWith('Compare proposed') ? decision : instructions.startsWith('Independently audit') ? audit : logo;
+          return Response.json({ output: [{ content: [{ type: 'output_text', text: JSON.stringify(value) }] }] });
+        }
+        historySearches++;
+        assert.ok(body.instructions.includes('specific logo variant'));
+        return Response.json({ status: 'completed', output: [
+          { type: 'web_search_call', status: 'completed' },
+          { type: 'message', content: [{ type: 'output_text',
+            text: JSON.stringify({ timePeriod: 'Documented on the 2008 release artwork' }),
+            annotations: cited ? [{ type: 'url_citation', url: 'https://example.com/artwork', title: 'Release artwork' }] : [],
+          }] },
+        ] });
+      },
+    });
+    const response = await logoRoute.POST(new Request('http://localhost/api/enhancedAnalysis', {
+      method: 'POST', body: JSON.stringify({ imageDataUrl: 'data:image/png;base64,target' }),
+    }));
+    assert.equal(response.status, 200);
+    assert.equal(historySearches, 1);
+    const { analysis } = await response.json();
+    assert.equal(analysis.name, 'Example band logo');
+    assert.equal(analysis.historicalAttribution.status, cited ? 'source_supported' : 'not_established');
+    assert.equal(analysis.timePeriod, cited ? 'Documented on the 2008 release artwork' : 'Unknown');
+    assert.equal(analysis.sources.find(item => item.kind === 'web')?.url, cited ? 'https://example.com/artwork' : undefined);
+    assert.equal(analysis.contextDescription, '');
   }
   const invalid = await route.POST(new Request('http://localhost/api/enhancedAnalysis', { method: 'POST', body: JSON.stringify({ imageDataUrl: 'not-an-image' }) }));
   assert.equal(invalid.status, 400);
