@@ -29,7 +29,6 @@ export function cleanSourceText(value: unknown, length = 4000) {
   }).replace(/\s+/g, ' ').trim().slice(0, length)
 }
 const clean = cleanSourceText
-export const validSymbolName = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0 && value.length <= 120
 
 type WikiPage = { pageid?: number; title?: string; extract?: string; missing?: boolean; index?: number; thumbnail?: { source?: string }; redirects?: Array<{ title?: string }> }
 type WikiResponse = { error?: unknown; query?: { redirects?: Array<{ from: string; to: string }>; pages?: WikiPage[] } }

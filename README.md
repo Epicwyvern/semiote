@@ -88,7 +88,7 @@ OPENAI_SYMBOL_SEARCH_MODEL=gpt-6-luna
 
 `REPLICATE_API_KEY` is also accepted and takes precedence over `REPLICATE_API_TOKEN`.
 
-`OPENAI_VISION_MODEL` controls full-image classification. For per-region visual analysis, reference comparison, and audit, the model is chosen in this order: `OPENAI_RECOGNITION_MODEL`, then `OPENAI_VISION_MODEL`, then `gpt-6-luna`. `OPENAI_SYMBOL_SEARCH_MODEL` controls web-assisted matching and symbol/logo research. A model override must support the request's image inputs and JSON output; changing the name alone does not guarantee compatibility, latency, or quality. These overrides apply to the current Discern pipeline; the older `/api/analyzeSymbol` and `/api/initialIdentify` endpoints still use their own model setting in code.
+`OPENAI_VISION_MODEL` controls full-image classification. For per-region visual analysis, reference comparison, and audit, the model is chosen in this order: `OPENAI_RECOGNITION_MODEL`, then `OPENAI_VISION_MODEL`, then `gpt-6-luna`. `OPENAI_SYMBOL_SEARCH_MODEL` controls web-assisted matching and symbol/logo research. A model override must support the request's image inputs and JSON output; changing the name alone does not guarantee compatibility, latency, or quality.
 
 Start the app from `code/`:
 
